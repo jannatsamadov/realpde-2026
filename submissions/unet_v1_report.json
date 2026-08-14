@@ -1,0 +1,18 @@
+{
+  "checkpoint": "checkpoints\\tke0_best.pt",
+  "zip": "D:\\Projects\\Competitions\\realpde\\submissions\\unet_v1.zip",
+  "extracted_mb": 6.759371757507324,
+  "scores": {
+    "rel_l2_score": 96.49808891797318,
+    "tke_score": 79.16984149672251,
+    "mvpe_score": 96.30521396873732,
+    "time_score": 83.05505117271554,
+    "sps_score": 25.881128264749997,
+    "_rel_l2_error": 0.07257990539073944,
+    "_tke_error": 0.5262144804000854,
+    "_mvpe_error": 0.07673075795173645,
+    "_sps_coverage": 0.3913638966300454,
+    "_measured_channels": 2,
+    "_mean_t_neural_s": 0.03034255312741152
+  }
+}

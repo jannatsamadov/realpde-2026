@@ -1,0 +1,27 @@
+# Competition data — 16 GB, published by the organizers, not ours to redistribute.
+# Fetch it from Hugging Face; see the README.
+NeurIPS 2026 RealPDE Competition/*
+!NeurIPS 2026 RealPDE Competition/*.md
+
+# Organizer-supplied starting kits: available from Codabench to registered teams.
+realpde_t1_starting_kit_v9/
+realpde_t2_starting_kit_v6/
+
+# Derived from the release by scripts/prepare_data.py (~3.3 GB)
+data/processed/
+
+# Environment (~4.7 GB)
+.venv/
+__pycache__/
+*.pyc
+
+# Training artefacts. Checkpoints are small but one appears per run; the
+# submitted one is kept deliberately, under submissions/.
+checkpoints/*.pt
+checkpoints/*_history.json
+figures/*.gif
+
+# Built submission archives and their unpacked staging directories
+submissions/*.zip
+submissions/*/
+!submissions/template/

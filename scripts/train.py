@@ -1,0 +1,235 @@
+"""Train a forecaster and score it with the organizers' scoring.py.
+
+GPU DUTY CYCLE
+    This machine's GPU fan is not working, so the loop deliberately idles between
+    optimizer steps to hold utilization near --gpu-duty (default 0.6). It measures
+    each step and sleeps step_time * (1/duty - 1) afterwards, then reports
+    temperature and utilization from nvidia-smi as it goes. Training is a few
+    minutes at this grid size, so the throttle costs little.
+
+MODEL SELECTION
+    final_score's combination rule is unpublished, so the checkpoint is chosen on
+    the mean of rel_l2_score, tke_score and mvpe_score. sps_score is reported but
+    not selected on: without calibrated bounds it reflects the default band, which
+    is a separate piece of work.
+
+Usage:
+    python scripts/train.py --epochs 30 --w-tke 0.0          # MSE only
+    python scripts/train.py --epochs 30 --w-tke 0.5          # with the TKE term
+    python scripts/train.py --split sim --epochs 10 --tag pretrain
+    python scripts/train.py --init-from checkpoints/pretrain_best.pt --epochs 30
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from realpde.data import build_datasets, denormalize
+from realpde.local_score import format_scores, score_arrays
+from realpde.losses import CompositeLoss
+from realpde.models import build_model, count_parameters
+
+ROOT = Path(__file__).resolve().parent.parent
+CKPT_DIR = ROOT / "checkpoints"
+
+
+def gpu_query() -> tuple[float, float, float] | None:
+    """(utilization %, temperature C, power W), or None if nvidia-smi is unavailable."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        u, t, p = (float(s.strip()) for s in out.split(","))
+        return u, t, p
+    except Exception:
+        return None
+
+
+def gpu_status() -> str:
+    q = gpu_query()
+    return "gpu n/a" if q is None else f"gpu {q[0]:.0f}%  {q[1]:.0f}C  {q[2]:.0f}W"
+
+
+def thermal_guard(max_temp: float, resume_temp: float, quiet: bool = False) -> bool:
+    """Block while the GPU is above max_temp. Returns True if it had to wait.
+
+    The fan on this machine does not work, so a duty cycle alone is not enough:
+    if the card is already hot when training starts, throttling to 60% still lets
+    it climb. This pauses outright until it has cooled to resume_temp.
+    """
+    q = gpu_query()
+    if q is None or q[1] < max_temp:
+        return False
+    waited = 0.0
+    if not quiet:
+        print(f"\n  !! GPU at {q[1]:.0f}C (limit {max_temp:.0f}C) — pausing to cool", flush=True)
+    while True:
+        time.sleep(5.0)
+        waited += 5.0
+        q = gpu_query()
+        if q is None or q[1] <= resume_temp:
+            break
+        if waited % 30 == 0 and not quiet:
+            print(f"     still {q[1]:.0f}C after {waited:.0f}s", flush=True)
+    if not quiet:
+        print(f"  resumed after {waited:.0f}s at {q[1] if q else float('nan'):.0f}C\n", flush=True)
+    return True
+
+
+@torch.no_grad()
+def evaluate(model, val_loader, device, channels: int = 2) -> dict:
+    model.eval()
+    preds, targets, times = [], [], []
+    for batch in val_loader:
+        x = batch["input"].to(device, non_blocking=True)
+        y = batch["target"]
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        p = model(x)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        times.append((time.perf_counter() - t0) / x.shape[0])
+        preds.append(p.cpu())
+        targets.append(y)
+
+    pred = denormalize(torch.cat(preds), channels).numpy()
+    target = denormalize(torch.cat(targets), channels).numpy()
+    t_neural = float(np.mean(times))
+    scores = score_arrays(pred, target, mean_t_neural_s=t_neural)
+    scores["_selection"] = float(np.mean([
+        scores["rel_l2_score"], scores["tke_score"], scores["mvpe_score"]
+    ]))
+    return scores
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--split", default="real", choices=["real", "sim"])
+    ap.add_argument("--model", default="unet", choices=["unet", "advective"],
+                    help="'advective' adds the semi-Lagrangian prior, derived "
+                         "physics channels and coordinates as network inputs")
+    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--base", type=int, default=64, help="U-Net base width")
+    ap.add_argument("--w-mse", type=float, default=1.0)
+    ap.add_argument("--w-tke", type=float, default=0.0)
+    ap.add_argument("--w-mvpe", type=float, default=0.0)
+    ap.add_argument("--train-stride", type=int, default=10)
+    ap.add_argument("--gpu-duty", type=float, default=0.72,
+                    help="target GPU duty cycle; the fan on this machine is dead")
+    ap.add_argument("--max-temp", type=float, default=78.0,
+                    help="pause training above this GPU temperature (C)")
+    ap.add_argument("--resume-temp", type=float, default=70.0,
+                    help="resume once the GPU has cooled back to this temperature (C)")
+    ap.add_argument("--init-from", type=str, default=None)
+    ap.add_argument("--tag", type=str, default="run")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    train_ds, val_ds = build_datasets(args.split, train_stride=args.train_stride)
+    # The simulation split carries pressure as a third channel; only u and v are
+    # ever scored, so both splits are trained on the same two.
+    use_channels = 2
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=0, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            num_workers=0)
+
+    model = build_model(args.model, base=args.base, channels=use_channels).to(device)
+    n_par, mb = count_parameters(model)
+    if args.init_from:
+        state = torch.load(args.init_from, map_location=device)
+        model.load_state_dict(state["model"])
+        print(f"initialised from {args.init_from}")
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    criterion = CompositeLoss(args.w_mse, args.w_tke, args.w_mvpe)
+
+    print(f"\ndevice {device}   {gpu_status()}")
+    print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
+    print(f"data   {args.split}: {len(train_ds)} train / {len(val_ds)} val windows")
+    print(f"loss   mse={args.w_mse} tke={args.w_tke} mvpe={args.w_mvpe}")
+    print(f"gpu duty target {args.gpu_duty:.0%}, pause above {args.max_temp:.0f}C "
+          f"(fan is dead — deliberate throttle)\n")
+
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    best, history = -1.0, []
+    sleep_ratio = max(1.0 / max(args.gpu_duty, 1e-3) - 1.0, 0.0)
+    peak_temp, pauses = 0.0, 0
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        agg, nb = {}, 0
+        t_epoch = time.perf_counter()
+        for step, batch in enumerate(train_loader):
+            # Check the temperature a few times per epoch rather than every step:
+            # nvidia-smi costs ~20 ms, which would dominate a 15 ms training step.
+            if step % 25 == 0:
+                q = gpu_query()
+                if q is not None:
+                    peak_temp = max(peak_temp, q[1])
+                if thermal_guard(args.max_temp, args.resume_temp):
+                    pauses += 1
+            t0 = time.perf_counter()
+            x = batch["input"][..., :use_channels].to(device, non_blocking=True)
+            y = batch["target"][..., :use_channels].to(device, non_blocking=True)
+
+            opt.zero_grad(set_to_none=True)
+            loss, parts = criterion(model(x), y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+            for k, v in parts.items():
+                agg[k] = agg.get(k, 0.0) + float(v)
+            nb += 1
+
+            # Hold the duty cycle: idle in proportion to how long the step took.
+            if sleep_ratio > 0:
+                time.sleep((time.perf_counter() - t0) * sleep_ratio)
+
+        sched.step()
+        line = "  ".join(f"{k} {agg[k] / nb:.5f}" for k in sorted(agg))
+        print(f"epoch {epoch:>3}/{args.epochs}  {line}  "
+              f"[{time.perf_counter() - t_epoch:.1f}s, {gpu_status()}]")
+
+        if epoch % 5 == 0 or epoch == args.epochs:
+            scores = evaluate(model, val_loader, device, use_channels)
+            history.append({"epoch": epoch, **{k: v for k, v in scores.items()}})
+            print(format_scores(scores))
+            if scores["_selection"] > best:
+                best = scores["_selection"]
+                torch.save({"model": model.state_dict(), "args": vars(args),
+                            "scores": scores, "epoch": epoch},
+                           CKPT_DIR / f"{args.tag}_best.pt")
+                print(f"  -> new best (selection {best:.3f}), checkpoint saved")
+            print()
+
+    (CKPT_DIR / f"{args.tag}_history.json").write_text(json.dumps(history, indent=2))
+    print(f"done. best selection score {best:.3f}")
+    print(f"checkpoint: {CKPT_DIR / f'{args.tag}_best.pt'}")
+    print(f"thermals: peak {peak_temp:.0f}C, {pauses} cooling pause(s), "
+          f"final {gpu_status()}")
+
+
+if __name__ == "__main__":
+    main()
