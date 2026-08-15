@@ -92,8 +92,11 @@ def evaluate(model, val_loader, device, channels: int = 2) -> dict:
     model.eval()
     preds, targets, times = [], [], []
     for batch in val_loader:
-        x = batch["input"].to(device, non_blocking=True)
-        y = batch["target"]
+        # Slice to the scored channels exactly as the training loop does. The
+        # simulated split carries a third (pressure) channel that the model never
+        # takes, so omitting this crashes on sim and silently passes on real.
+        x = batch["input"][..., :channels].to(device, non_blocking=True)
+        y = batch["target"][..., :channels]
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()

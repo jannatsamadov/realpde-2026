@@ -904,6 +904,131 @@ Yəni model səhv etmir, MSE-nin tələb etdiyini edir.
 
 ---
 
+## 6p. Advective model, pretraining, model ölçüsü (14-15 avqust)
+
+`scripts\compare_runs.py` — bütün run-ları yan-yana qoyur.
+
+| run | arxitektura | base | pretrain | rel_l2 | tke | mvpe | sps | time | **seçim** |
+|---|---|---|---|---|---|---|---|---|---|
+| persistence | — | — | — | 93.50 | 66.67 | 93.39 | 17.01 | 92.35 | 84.520 |
+| `tke0` (1-ci submission) | unet | 64 | — | 96.06 | 75.37 | 96.10 | 22.07 | 95.84 | 89.174 |
+| `advective` | advective | 64 | — | 96.16 | 75.78 | 96.42 | 22.41 | 88.26 | 89.456 |
+| `adv_base128` | advective | **128** | — | 96.23 | 76.05 | 96.46 | 22.82 | 88.08 | 89.580 |
+| **`adv_finetuned`** | advective | 64 | **sim** | **96.25** | **76.32** | **96.54** | 22.96 | 91.41 | **89.703** |
+
+### Nəticələr
+**1. Advection girişi işləyir** (istifadəçinin ideyası): `unet` 89.174 → `advective` 89.456.
+Model `advect_sequence` işlədir — sahə **öz sürəti ilə** daşınır, sürət hər addımda
+yenidən oxunur, ona görə **burulğanların fırlanması ötürülür**. Girişə həmçinin
+`|V|`, burulma, divergensiya və mütləq `x,y` koordinatları verilir.
+
+**2. Sim pretraining kömək edir**, amma az: **+0.248**. Track 1-in mahiyyəti budur.
+Diqqətçəkən: `amplituda (0.731) > korrelyasiya (0.626)` — əvvəlki modeldə ikisi
+**bərabər** idi (MSE-nin nəzəri davranışı). Pretraining modelin dalğalanma
+amplitudasını qaldırıb, saxlanan TKE 44.1% → **55.2%**.
+
+**3. Model böyütmək İŞLƏMİR**: base 64→128 (1.79M→7.04M) cəmi **+0.125** verir,
+əvəzinə 4× checkpoint və ən pis `time_score`. **Darboğaz tutum deyil, data azlığıdır** —
+ona görə sim data (data əlavə edir) kömək etdi, tutum artırmaq isə yox.
+
+⚠️ Hər iki qazanc (+0.248, +0.125) val split-imizin **daxili yayılmasından (3-4 xal)
+kiçikdir** — yəni ciddi mənada hələ sübut olunmuş deyil.
+
+---
+
+## 6q. ⭐ SPS KALİBRLƏMƏSİ — ƏN BÖYÜK QAZANC (15 avqust)
+
+`scripts\calibrate_sps.py`, `src\realpde\sps.py`
+
+### Problem
+1-ci submission `lower`/`upper` **vermirdi**, ona görə scorer öz default band-ını
+işlədirdi: `±5%·|proqnoz|`. O, modelin xətası ilə **heç bir əlaqəsi olmayan** ixtiyari
+endir. Ölçüldü: elementlərin **60.1%-i intervaldan kənarda qalır və dəqiq sıfır alır.**
+
+Səbəb: band `|proqnoz|`-un faizidir → sürətin kiçik olduğu yerdə dar olur.
+Sürətin kiçik olduğu yer isə məhz **wake**-dir, yəni xətanın ən böyük olduğu yer.
+
+### Modelin əsl xətası
+```
+|qalıq| ortalama 0.00510   median 0.00219   p90 0.01190
+qalıq std        0.01074
+SIGMA_GLOBAL     0.05639   ← scorer-in miqyası
+```
+Xətamız `SIGMA_GLOBAL`-dan **5 dəfə kiçikdir** → dar VƏ örtən interval mümkündür.
+
+### Riyazi optimum
+Qalıq `N(0, s²)` olsa, `exp(-w/σ)·P(|e| ≤ w/2)` maksimumu:
+```
+φ(r) / (2Φ(r) − 1) = s / SIGMA_GLOBAL,    optimal en w = 2·s·r
+```
+Yəni optimal en **yalnız `k = s/σ` nisbətindən** asılıdır. Kod: `src\realpde\sps.py`.
+`scipy` konteynerdə yoxdur → analitik erf yaxınlaşması (Abramowitz–Stegun) + cədvəl.
+
+⚠️ **Performans tələsi:** ilk versiyada `np.vectorize(math.erf)` işlətmişdim — o,
+Python döngüsüdür və 22M element üzərində **heç vaxt bitmir**. İndi 2.2M element 0.28 s.
+
+### Nəticələr (273 validation pəncərəsi)
+| üsul | SPS | örtmə | orta en |
+|---|---|---|---|
+| default band (1-ci submission) | **22.96** | 0.399 | 0.00822 |
+| training-dən öyrənilmiş, ×0.8 | **48.74** | 0.876 | 0.01784 |
+| training-dən, ×1.0 | 47.39 | 0.915 | 0.02230 |
+| enerjiyə görə miqyaslanmış ×0.8 | 48.54 | 0.841 | 0.01579 |
+| *validation-dan öyrənilmiş ×0.8 (aldatma)* | *48.97* | *0.865* | *0.01687* |
+
+**Dürüst versiya aldadıcıdan cəmi 0.23 xal geridədir** → `sigma` xəritəsi görünməmiş
+Reynolds ədədlərinə yaxşı ümumiləşir. Gizli test üçün ən vacib sual bu idi.
+
+Enerjiyə görə miqyaslama **kömək etmədi** → sadə sabit xəritə seçildi.
+`sigma` faylı: `checkpoints\sps_sigma.npz` (289 KB), submission-a qoşulur.
+
+**Qazanc: +25.78 xal, training tələb etmədən.**
+
+---
+
+## 6r. İKİNCİ SUBMISSION — hazır və yoxlanılıb
+
+```
+submissions\adv_v2.zip   6.64 MB   (model: adv_finetuned + kalibrlənmiş bound-lar)
+```
+
+| subscore | `unet_v1` (göndərildi) | `adv_v2` (hazır) | fərq |
+|---|---|---|---|
+| rel_l2 | 96.06 | 96.25 | +0.19 |
+| tke | 75.37 | 76.32 | +0.95 |
+| mvpe | 96.10 | 96.54 | +0.44 |
+| **sps** | 22.07 | **48.74** | **+26.67** |
+| time | 95.84 | 86.54 | −9.30 |
+
+`time` düşür, çünki `advect_sequence` ardıcıldır (40 `grid_sample` çağırışı).
+Bu, bilərəkdən qəbul edilmiş mübadilədir: dəqiqlik prioritetdir.
+
+### ⚠️ Paketləmə səhvi tutuldu
+`build_submission.py`-ın təmiz-proses yoxlaması `submission.py`-ın hələ də
+`UNetForecaster` yüklədiyini aşkarladı, checkpoint isə `AdvectiveUNet` idi →
+shape uyğunsuzluğu. **Göndərilsəydi bütün subscore-lar sıfır olardı və bir günlük
+haqqımız yanardı.** Düzəliş: arxitektura adı checkpoint-in `config`-inə yazılır.
+
+Bu, yoxlama harness-inin niyə qurulduğunun konkret sübutudur.
+
+---
+
+## 6s. İnfrastruktur qeydləri (15 avqust)
+
+**`evaluate()` kanal səhvi:** training döngüsü `[..., :use_channels]` edirdi,
+qiymətləndirmə isə yox. Real data 2 kanallı olduğu üçün **gizli qalmışdı** —
+yalnız sim (3 kanal, `p` daxil) üzə çıxardı. İki kod yolu eyni fərziyyəyə söykənir,
+biri onu tətbiq etmir → tipik tələ.
+
+**Windows Update gecə restart-ı:** 15 avqust 07:21-də `MoUsoCoreWorker.exe`
+maşını yenidən başladıb (Event Id 1074). Training 03:21-də bitmişdi, əlaqəsi yoxdur.
+Uzun gecə işləri üçün Windows Update "aktiv saatları" genişləndirilməlidir.
+
+**Şəkillər:** hər model üçün `figures\report_<ad>.png` (6 panel) və
+`figures\pred_<ad>_6300_20_w100.gif` (həqiqət/model/fərq) mövcuddur.
+
+---
+
 ## 7. Plan
 
 ### Həftə 1 — infrastruktur

@@ -24,7 +24,7 @@ import torch
 
 from realpde.data import build_datasets, denormalize
 from realpde.local_score import score_arrays
-from realpde.models import UNetForecaster
+from realpde.models import build_model
 from realpde.sps import SIGMA_GLOBAL, bounds_from_sigma, optimal_width
 
 
@@ -34,7 +34,8 @@ def main() -> None:
     args = ap.parse_args()
 
     state = torch.load(args.checkpoint, map_location="cpu")
-    model = UNetForecaster(base=state.get("args", {}).get("base", 64), channels=2)
+    targs = state.get("args", {})
+    model = build_model(targs.get("model", "unet"), base=targs.get("base", 64), channels=2)
     model.load_state_dict(state["model"])
     model.eval()
 

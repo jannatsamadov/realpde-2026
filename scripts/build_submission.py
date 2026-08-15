@@ -82,8 +82,11 @@ def build(checkpoint: Path, tag: str, return_bounds: bool) -> Path:
     payload = {
         "model": state["model"],
         "config": {
+            # The architecture travels with the weights: submission.py builds
+            # whatever this says rather than assuming one class.
+            "arch": train_args.get("model", "unet"),
             "t_in": 20, "t_out": 20, "channels": 2,
-            "base": train_args.get("base", 64), "residual": True,
+            "base": train_args.get("base", 64),
         },
     }
     torch.save(payload, out_dir / "model.pth")
@@ -92,6 +95,11 @@ def build(checkpoint: Path, tag: str, return_bounds: bool) -> Path:
         shutil.copy(src, out_dir / dest)
     text = TEMPLATE.read_text(encoding="utf-8")
     if return_bounds:
+        sigma = ROOT / "checkpoints" / "sps_sigma.npz"
+        if not sigma.exists():
+            raise SystemExit(
+                f"--bounds needs {sigma}; run scripts/calibrate_sps.py first")
+        shutil.copy(sigma, out_dir / "sps_sigma.npz")
         text = text.replace("RETURN_BOUNDS = False", "RETURN_BOUNDS = True")
     (out_dir / "submission.py").write_text(text, encoding="utf-8")
 
