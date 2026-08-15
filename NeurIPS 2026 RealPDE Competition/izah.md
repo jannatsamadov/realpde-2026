@@ -1029,6 +1029,224 @@ Uzun gecə işləri üçün Windows Update "aktiv saatları" genişləndirilməl
 
 ---
 
+## 6t. ⭐ BÜTÜN ÖLÇÜLƏRİN CƏDVƏLİ (15 avqust)
+
+Hamısı **273 validation pəncərəsində**, rəsmi `scoring.py` ilə.
+Val split: Re {6300, 13950, 22875} — training-də heç vaxt görülməyib.
+`seçim` = rel_l2, tke, mvpe ortası (final_score düsturu gizli olduğu üçün proksi).
+
+### A. Trivial baseline-lar (model YOX, sadəcə arifmetika)
+| üsul | rel_l2 | tke | mvpe | sps | time | seçim |
+|---|---|---|---|---|---|---|
+| `zero` (hamısı sıfır) | 66.67 | 66.67 | 66.67 | 0.00 | 92.35 | 66.67 |
+| `last_window` (girişin kopyası) | 92.70 | 72.98 | 94.40 | 16.03 | 92.35 | 86.69 |
+| `persistence` (son kadr ×20) | 93.50 | 66.67 | 93.39 | 17.01 | 92.35 | 84.52 |
+| `time_mean` (pəncərənin ortası) | **94.03** | 66.67 | 94.40 | 17.50 | 92.35 | 85.03 |
+| *oracle (pred = target)* | *100* | *100* | *100* | *87.70* | *92.35* | *100* |
+
+### B. Daşınma priorları tək başına (şəbəkə YOX) — HAMISI UĞURSUZ
+| üsul | rel_l2 | tke | mvpe | sps | tke_err |
+|---|---|---|---|---|---|
+| persistence (müqayisə) | **93.50** | 66.67 | 93.39 | 17.01 | **1.00** |
+| özünü-daşıma, substeps=1 | 89.51 | 40.04 | 87.81 | 11.43 | 2.99 |
+| özünü-daşıma, substeps=2 | 89.93 | 43.84 | 88.19 | 11.67 | 2.56 |
+| özünü-daşıma, substeps=4 | 90.06 | 45.28 | 88.29 | 11.78 | 2.42 |
+| donmuş: pəncərə orta V | 86.13 | 19.05 | 86.17 | 9.52 | 8.50 |
+| donmuş: pəncərə orta V + maska | 91.70 | 40.45 | 91.61 | 13.03 | 2.94 |
+| donmuş: yalnız orta u | 86.11 | 18.80 | 85.79 | 9.41 | 8.64 |
+| donmuş: yalnız orta u + maska | 91.62 | 39.19 | 91.13 | 12.79 | 3.10 |
+| donmuş: qlobal orta u | 86.18 | 21.50 | 84.84 | 8.79 | 7.30 |
+| donmuş: qlobal orta u + maska | 90.09 | 36.73 | 88.91 | 11.20 | 3.44 |
+
+### C. Öyrədilmiş modellər
+
+⚠️ **Bu cədvəldəki `sps` sütunu DEFAULT BANDLADIR** — yəni `lower`/`upper` verilmədən.
+`train.py`-ın qiymətləndirməsi bantları hesablamır; onlar sonradan, paketləmə
+mərhələsində əlavə olunur. Kalibrlənmiş bantlarla eyni model **48.74** alır (bölmə D).
+Bu sütunu modellər arasında müqayisə üçün oxu, mütləq dəyər kimi yox.
+
+| run | arxitektura | base | pretrain | epoxa | rel_l2 | tke | mvpe | sps¹ | time | **seçim** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `speedtest` | unet | 64 | — | 2 | 95.09 | 71.87 | 94.91 | 18.88 | 91.08 | 87.29 |
+| `tke2` (w_tke=2.0) | unet | 64 | — | 5 | 93.91 | 73.90 | 93.99 | 16.76 | 92.07 | 87.27 |
+| `smoke` | unet | 64 | — | 5 | 95.43 | 72.62 | 95.33 | 19.78 | 90.11 | 87.79 |
+| `tke0p5` (w_tke=0.5) | unet | 64 | — | 25 | 95.45 | 74.87 | 95.68 | 19.96 | 96.21 | 88.67 |
+| `tke0` (**1-ci submission**) | unet | 64 | — | 25 | 96.06 | 75.37 | 96.10 | 22.07 | 95.84 | 89.17 |
+| `advective` | advective | 64 | — | 30 | 96.16 | 75.78 | 96.42 | 22.41 | 88.26 | 89.46 |
+| `advective_fast` (frozen, yarımçıq) | advective | 64 | — | 20 | — | — | — | — | 95.20 | 85.38 |
+| `adv_base128` | advective | **128** | — | 30 | 96.23 | 76.05 | 96.46 | 22.82 | 88.08 | 89.58 |
+| **`adv_finetuned`** (**2-ci submission**) | advective | 64 | **sim** | 30 | **96.25** | **76.32** | **96.54** | 22.96 | 91.41 | **89.70** |
+| *`sim_pretrain`* (sim split-də — müqayisə olunmaz) | advective | 64 | — | 15 | *94.37* | *80.32* | *94.99* | *27.30* | *91.46* | *89.89* |
+
+¹ default bandla. Göndərdiyimiz `adv_v2` **eyni `adv_finetuned` modelidir**, üstəlik
+kalibrlənmiş bantlar:
+
+| `adv_finetuned` | rel_l2 | tke | mvpe | sps | time |
+|---|---|---|---|---|---|
+| default bandla (yuxarıdakı sətir) | 96.25 | 76.32 | 96.54 | **22.96** | 91.41 |
+| kalibrlənmiş bantla (**göndərildi**) | 96.25 | 76.32 | 96.54 | **48.74** | 86.54 |
+| həmin submission, **leaderboard** | 94.55 | 74.63 | 93.49 | **36.17** | 87.15 |
+
+Model eynidir — fərq yalnız `predict()`-in `lower`/`upper` qaytarıb-qaytarmamasındadır.
+
+### D. SPS bant kalibrləməsi (`adv_finetuned` üzərində)
+| üsul | sps | örtmə | orta en |
+|---|---|---|---|
+| default band (scorer-in öz bandı) | **22.96** | 0.399 | 0.00822 |
+| training-dən, ×0.8 | **48.74** | 0.876 | 0.01784 |
+| training-dən, ×1.0 | 47.39 | 0.915 | 0.02230 |
+| training-dən, ×1.2 | 45.32 | 0.939 | 0.02676 |
+| training-dən, ×1.5 | 41.83 | 0.960 | 0.03344 |
+| enerjiyə görə miqyaslanmış ×0.8 | 48.54 | 0.841 | 0.01579 |
+| *validation-dan (aldatma, göndərilə bilməz)* | *48.97* | *0.865* | *0.01687* |
+
+### E. `α` amplituda düzəlişi (`adv_finetuned`, bant inflate 1.49)
+| `α` | rel_l2 | tke | mvpe | sps | təxmini final |
+|---|---|---|---|---|---|
+| 1.00 | 96.25 | 76.32 | 96.54 | 44.68 | 82.45 |
+| 1.10 | 96.22 | 77.31 | 96.54 | 44.85 | 82.69 |
+| **1.15** | 96.19 | **77.51** | 96.54 | 44.83 | **82.71** |
+| 1.20 | 96.16 | 77.46 | 96.54 | 44.70 | 82.66 |
+| 1.354 (*nəzəri*) | 96.01 | 75.29 | 96.54 | 43.61 | 81.88 |
+| 1.60 | 95.72 | 68.99 | 96.54 | 41.43 | 79.95 |
+
+**Nəzəri `α` optimal DEYİL.** TKE ümumi enerjini yox, TKE **xəritəsinin** nisbi L2-sini
+ölçür → amplitudanı bərabər qaldıranda dalğalanma səhv yerlərdə də böyüyür.
+
+### F. ⭐ LEADERBOARD nəticələri (gizli test seti)
+| submission | rel_l2 | tke | mvpe | time | sps | **final** | sıra |
+|---|---|---|---|---|---|---|---|
+| `unet_v1` (tke0) | 94.635 | 73.677 | 93.160 | 92.303 | 16.644 | **73.665** | 102/138 |
+| `adv_v2` (adv_finetuned + bantlar) | 94.547 | 74.631 | 93.487 | 87.153 | 36.170 | **78.766** | ? |
+| fərq | −0.088 | **+0.954** | +0.327 | **−5.150** | **+19.526** | **+5.101** | |
+
+### G. Lokal ↔ gizli set fərqi (kalibrləmə)
+| metrika | lokal | gizli | fərq |
+|---|---|---|---|
+| rel_l2 | 96.25 | 94.55 | −1.70 |
+| tke | 76.32 | 74.63 | −1.69 |
+| mvpe | 96.54 | 93.49 | −3.05 |
+| **sps** | 48.74 | 36.17 | **−12.57** |
+
+SPS-dəki böyük fərqin səbəbi ölçüldü: **gizli setdə qalıqlar ~1.49× böyükdür**,
+örtmə 87.6% → 69.8% düşür. Bantlarımız oraya dar gəlir.
+
+---
+
+## 6u. `final_score` düsturu — iki submission-dan çıxarılanlar
+
+İki submission = iki tənlik, beş naməlum → düstur **hələ də təyin edilə bilməz**.
+Amma bir uyğun həll: **`w_sps ≈ 0.301`, digərləri ≈ 0.194** (cəmi 1.077).
+
+Bərabər çəki `+3.11` verərdi, faktiki dəyişim **+5.10** oldu → **SPS bərabər paydan
+artıq çəkidədir.**
+
+### ⚠️ STRUKTUR MƏHDUDİYYƏT
+```
+sps = 100 × acc × Q,     Q = E[exp(−nil)·inside] ≤ 1
+acc = 0.5(1−pm_rel_l2) + 0.3(1−pm_tke) + 0.2(1−pm_mvpe)
+```
+→ **`sps ≤ 100 × acc`**. Bizim `acc = 0.690`, deməli **SPS heç vaxt 69-u keçə bilməz.**
+
+Bantları *mükəmməl* etsək (Q=1) `final` = **88.63**. Yəni **bant tənzimləməsi ilə
+90-a çatmaq mümkün deyil.**
+
+### 90-a çatmaq üçün nə lazımdır
+| ssenari | rel_l2 | tke | mvpe | time | sps | final |
+|---|---|---|---|---|---|---|
+| indi | 94.5 | 74.6 | 93.5 | 87.2 | 36.1 | 78.75 |
+| + bant + `α` | 94.5 | 75.8 | 93.5 | 87.2 | 38.3 | 79.63 |
+| + advection-suz (sürət qayıdır) | 94.5 | 75.8 | 93.5 | **92.0** | 38.3 | 80.57 |
+| tke 85 | 94.5 | 85.0 | 93.5 | 87.2 | 40.8 | 82.15 |
+| hamısı +2, tke 90, Q 0.65 | 96.5 | 90.0 | 95.5 | 92.0 | 52.8 | 88.46 |
+| **97 / 92 / 97 / 93, Q 0.70** | 97.0 | **92.0** | 97.0 | 93.0 | 59.2 | **91.34** |
+
+**`tke_score` ~92 lazımdır** (indi 74.6). O, iki dəfə ödəyir: öz xalı + SPS tavanı.
+Post-hoc düzəlişlərlə mümkün deyil — dalğalanmanı **düzgün yerdə** proqnozlaşdırmaq
+lazımdır. Generativ model (diffusion) bu problemin standart cavabıdır.
+
+---
+
+## 6v. Mükafatlar və kvota (sənəddən)
+
+| Yer | Məbləğ |
+|---|---|
+| 1-ci | **$6,000** |
+| 2-ci | **$3,000** |
+| 3-cü | **$1,500** |
+
+*"Awarded independently per track. Compete in both for double the opportunity."*
+→ **Hər track üçün ayrıca.** İki track-da 1-ci = $12,000. Sponsor: Uniforce AI Ltd.
+
+- top 3 (hər track): workshop-da şifahi təqdimat
+- top 5 (hər track): ortaq məqalədə həmmüəllif + bir elmi rəhbər nominasiyası
+- top 5: sertifikat
+
+**Kvota:** *"1 submission per day; 100 total per phase across all participating tracks."*
+Gündəlik 1 hər track üçün ayrıca; **100 ümumi limit isə iki track arasında paylaşılır.**
+
+---
+
+## 6w. ⭐ RƏSMİ BASELINE-LARLA MÜQAYİSƏ (15 avqust)
+
+Checkpoint-lər **data repo-sunun içindədir** (əlavə mənbə lazım deyil):
+```
+huggingface.co/datasets/AI4Science-WestlakeU/RealPDE-Competition-Data
+  baseline_checkpoints/sim_pretrain/    sim_{cno,fno,transolver}.pth
+  baseline_checkpoints/sim_real_ft/     sim_real_{cno,fno,transolver}.pth
+```
+Endirildi: `realpde\baselines\` (FNO 384 MB, CNO 30.7 MB, Transolver 48.1 MB).
+Skript: `scripts\eval_official_baselines.py`
+
+Struktur diqqətçəkəndir: təşkilatçıların öz resepti **sim pretrain → real finetune** —
+yəni biz A1/A2-də müstəqil olaraq eyni yanaşmaya gəlmişik.
+
+### ⚠️ ƏVVƏLCƏ BİR SƏHV
+İlk ölçmədə baseline-lara **xam m/s** verdim və FNO-nun `rel_l2` xətası **2.37**
+çıxdı (persistence 0.14!). Təşkilatçıların release etdiyi model belə ola bilməzdi →
+səhv məndə idi.
+
+Səbəb: **modellər NORMALLAŞDIRILMIŞ fəzada işləyir**, həm girişdə, həm çıxışda.
+Kit-də `mean_std_real.pt` faylının olması onsuz da bunu deyirdi.
+`scripts\probe_baseline_convention.py` ilə təsdiqləndi:
+
+| konvensiya | rel_l2 xətası | proqnoz ortası | proqnoz std |
+|---|---|---|---|
+| xam m/s giriş | 2.3694 | 0.00472 | 0.12297 |
+| **normallaşdırılmış giriş+çıxış** | **0.0576** | **0.03635** | **0.04399** |
+| normallaşdırılmış giriş, xam çıxış | 13.0900 | −0.42483 | 0.57389 |
+| *hədəf* | — | *0.03631* | *0.04420* |
+
+**Dərs:** skriptin şərhində "onlar öz normalizasiyasını daxildə edir" yazmışdım —
+bu, **yoxlanmamış fərziyyə** idi, fakt kimi yazılmışdı. Nəticə inandırıcı olmayanda
+modeli yox, öz kodunu şübhə altına al.
+
+CNO yüklənmək üçün `requests` tələb edir (vendored `dnnlib`) — venv-ə quraşdırıldı.
+
+### Nəticə (273 val pəncərəsi, hamısı default bandla)
+| model | parametr | rel_l2 | tke | mvpe | sps | ms/nümunə (CPU) | **seçim** |
+|---|---|---|---|---|---|---|---|
+| **rəsmi FNO** | 50.4M | **96.59** | **78.32** | **97.02** | 22.69 | 395 | **90.64** |
+| **bizim `adv_finetuned`** | **1.8M** | 96.25 | 76.32 | 96.54 | **22.96** | — | **89.70** |
+| rəsmi CNO | 8.0M | 95.96 | 75.73 | 96.25 | 20.88 | 2788 | 89.31 |
+| bizim `tke0` | 1.8M | 96.06 | 75.37 | 96.10 | 22.07 | — | 89.17 |
+| rəsmi Transolver | 12.5M | 93.85 | 70.86 | 94.40 | 14.70 | 5432 | 86.37 |
+
+**Beş modeldən ikinciyik. FNO bizi hər üç dəqiqlik metrikasında keçir** (TKE-də
+fərq ən böyükdür: 78.32 vs 76.32). Bizim modelimiz FNO-dan **28× kiçikdir**.
+
+### İki mühüm nəticə
+**1. Bizim SPS üstünlüyümüz MODEL üstünlüyü deyil.** Cədvəldə hamının `sps`-i
+20.9–23.0 arasındadır, çünki hamısı default banddadır. Bizim 48.74-ümüz **bant
+kalibrləməsindən** gəlir və o texnika **istənilən modelə** tətbiq oluna bilər.
+
+**2. Açıq yol: rəsmi FNO + bizim bantlarımız.** FNO-nun dəqiqliyi yüksək olduğu
+üçün SPS tavanı (`100×acc`) da yüksəkdir. Maneələr:
+- **Ölçü:** FNO 384 MB, limit 256 MB → `sim_real_fno_fp16.pth` (~192 MB) işlədilməlidir
+- **Sürət:** 50M parametr, GPU-da da bizim 1.8M-dən ağır → `time_score` düşəcək
+
+---
+
 ## 7. Plan
 
 ### Həftə 1 — infrastruktur
