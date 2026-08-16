@@ -1504,6 +1504,54 @@ isə xaotik. Modelin xətasının `Q` ilə korrelyasiyasına baxmaq bir neçə d
 
 ---
 
+## 6dd. LÜĞƏT 2 — sonradan əlavə olunan terminlər
+
+Bölmə 6i-nin davamı. Burada yalnız 6i-dən sonra işlətdiyimiz terminlər var.
+
+### Axın strukturu
+
+| Termin | İzah |
+|---|---|
+| **deformasiya sürəti** (strain rate, `S`) | `S = (∇u + ∇uᵀ)/2`. Maye elementlərini **dartıb uzadan** hissə |
+| **fırlanma sürəti** (rotation rate, `W`) | `W = (∇u − ∇uᵀ)/2`. Maye elementlərini **fırladan** hissə |
+| **Q-kriteriyası** | `Q = ½(‖W‖² − ‖S‖²)`. `Q>0` → koherent burulğan (fırlanma üstündür), `Q<0` → struktur parçalanır (deformasiya üstündür). **Vorticity bunu ayırd edə bilmir** |
+| **koherent struktur** | Uzun müddət bütöv qalıb axınla aparılan mütəşəkkil burulğan. İçindəki maye birlikdə hərəkət edir |
+| **vorteks tökülməsi** (vortex shedding) | Maneənin arxasında burulğanların **dövri** ayrılması |
+| **tökülmə tezliyi** | Burulğanların ayrılma tezliyi. Bizdə **3.08 Hz** ölçüldü |
+| **Strouhal ədədi** | `St = f·h/U` — tökülmənin ölçüsüz tezliyi. Küt cisimlər üçün klassik **≈ 0.2**. Bizdə **0.202** çıxdı → ölçmə düzgündür |
+| **vorteks birləşməsi** (vortex pairing) | Qonşu burulğanların birləşib böyüməsi. Hər birləşmə tezliyi **yarıya** salır. **Bizim datada müşahidə olunmadı** |
+| **wake spreading** | Wake-in downstream genişlənməsi. Bizdə də müşahidə olunmadı (korr −0.07) |
+| **Kelvin–Helmholtz** | İki fərqli sürətli təbəqənin sərhədindəki dayanıqsızlıq — shear təbəqəsini burulğana çevirən mexanizm. **Bizim axında üstündür** |
+| **Rayleigh–Taylor** | Sıxlıq təbəqələnməsi + təcil tələb edir. **Bizdə yoxdur** (təkfazalı su) |
+| **firehose / mirror** | **Plazma** dayanıqsızlıqları (anizotrop təzyiq + maqnit sahə). **Bizə aid deyil** |
+| **Taylor-un donmuş turbulentlik fərziyyəsi** | Burulğanların formasını saxlayıb orta axınla aparıldığı fərziyyəsi |
+| **lag-1 korrelyasiya** | Ardıcıl kadrlar arasındakı korrelyasiya. Fiziki siqnal üçün yüksək, ölçmə şumu üçün sıfır → **şum payı = 1 − r₁** |
+
+### Generativ modellər
+
+| Termin | İzah |
+|---|---|
+| **diffusion model** | Dataya tədricən şum əlavə etməyi, sonra onu **geri çıxarmağı** öyrənir. Nümunə üçün 50–1000 addım |
+| **DDPM** | Ən yayılmış diffusion variantı |
+| **flow matching** | Şumdan dataya **düz xətli sürət sahəsi** öyrənir. **4–8 addımda** nümunə verir. Bizim seçimimiz — `time_score` sürətə görə verildiyi üçün |
+| **rectified flow** | Flow matching-in bizim işlətdiyimiz forması: `x_t = (1−t)·z + t·hədəf`, model `hədəf − z`-ni öyrənir |
+| **Euler addımı** | Sürət sahəsini inteqrasiya edərkən atılan addım. Çox addım = keyfiyyət, az addım = sürət |
+| **şərtli generasiya** | Nümunənin girişdən (bizdə: giriş pəncərəsindən) asılı olması |
+| **stochastic interpolant** | Şumdan yox, **mövcud təxmindən** başlayan flow. İstifadəçinin ideyası bu idi |
+| **heteroskedastik başlıq** | Şəbəkənin hər element üçün həm `μ`, həm `σ` verməsi. SPS üçün faydalı, sınanmayıb |
+| **kvantil reqressiya** | 5%/50%/95% kvantillərini birbaşa çıxarmaq (pinball loss). Bantlar hazır çıxır |
+
+### Öyrənmə davranışı
+
+| Termin | İzah |
+|---|---|
+| **emergent ability** | Modelin müəyyən miqyasda "birdən" yeni qabiliyyət qazanması. Çox vaxt **ölçmə artefaktıdır** — loss hamar, metrika isə həddli olduğu üçün sıçrayış kimi görünür |
+| **grokking** | Model əvvəl əzbərləyir, uzun plato, sonra **birdən** ümumiləşdirir. Əsasən alqoritmik tapşırıqlarda |
+| **doyma əyrisi** | Hamar yavaşlayan yaxşılaşma. **Bizim flow training-də görünən budur** (+8.9 → +3.7 → +1.5 → +0.96 → +0.52) |
+| **cosine LR schedule** | Öyrənmə sürətinin kosinus əyrisi ilə azalması. Sona doğru addımlar kiçilir |
+
+---
+
 ## 7. Plan
 
 ### Həftə 1 — infrastruktur
