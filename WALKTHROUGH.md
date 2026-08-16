@@ -53,12 +53,80 @@ bant kalibrləməsindən gəlir — o texnika istənilən modelə qoşula bilər
 - ikisi birlikdə: təxminən **79.6**
 
 ## Növbəti seçimlər
-1. **Ucuz qazancları göndər** (15 dəq) → ~79.6
-2. **Rəsmi FNO fp16 + bizim bantlar** (bir neçə saat) → ehtimalla 81–84.
-   Qeyd: Decision Phase-də təşkilatçılar metodu sıfırdan öyrədir, hazır
-   checkpoint üzərində qurulmuş həll orada zəif görünə bilər.
-3. **Track 2** (LTTTA) — ayrı mükafat, ayrı gündəlik submission, kodun 80%-i köçür.
-4. **Generativ model** — `tke` 92-yə çatmağın yeganə real yolu, amma bir neçə gün.
+
+Hədəf: **`tke` 74.6 → ~92**, çünki `final = 90` üçün başqa yol yoxdur.
+`tke` iki dəfə ödəyir — öz xalı + SPS tavanını (`100×acc`) qaldırır.
+
+### 1. Ucuz qazancları göndər · 15 dəq · **+0.85** · ~əmin
+Bant miqyası (+0.58) və `α = 1.15` (+0.27). Hazırdır, sadəcə paketləmək qalıb.
+**Mənfi:** kiçikdir, bugünkü submission haqqını yeyir.
+
+### 2. Rəsmi FNO fp16 + bizim bantlar · saatlar · **+2…5** · orta əminlik
+FNO dəqiqlikdə bizi keçir (90.64 vs 89.70) → SPS tavanı da yüksəkdir.
+**Müsbət:** model öyrətmək lazım deyil; checkpoint açıq buraxılıb, kit yükləyici verir.
+**Mənfi:** 384 MB → fp16 (~192 MB) məcburidir; 50M parametr `time_score`-u salır;
+**Decision Phase-də təşkilatçılar metodu sıfırdan öyrədir** — hazır checkpoint
+üzərində qurulmuş həll orada zəif görünə bilər.
+
+### 3. Generativ / diffusion model · günlər · **+8…12 potensial** · **qeyri-müəyyən**
+`tke` 92-yə çatmağın yeganə real yolu. MSE şərti ortanı öyrədir → hamar proqnoz →
+TKE ölür. Diffusion bu problemin standart cavabıdır; RealPDEBench-in `WDNO`
+baseline-ı da bu ailədəndir.
+**Müsbət:** yeganə yol ki, tavana aparır; Decision Phase üçün də düzgün həlldir.
+**Mənfi:** bir neçə gün; `time_score` çox düşə bilər (diffusion çox addım tələb edir);
+nəticə **zəmanətsizdir**.
+**Qeyd:** az addımlı variant (consistency / flow-matching) sürət problemini yumşaldır.
+
+### 4. Ehtimallı çıxış (multi-sample) · 1–2 gün · **+3…6** · orta
+Model tək proqnoz yox, **paylanma** versin. Eyni anda iki metrikaya işləyir:
+nümunələrin yayılması SPS bantlarını **post-hoc yox, təbii** verir, orta isə
+dalğalanmanı saxlayır. Diffusion-un yüngül variantıdır.
+
+### 5. Ensemble · saatlar · **+1…3** · orta
+Bir neçə modeli (bizimki + FNO + CNO) birləşdir. Ortalama `rel_l2`-ni qaldırır,
+amma **`tke`-ni AŞAĞI salır** (ortalama hamarlayır) — ehtiyatlı olmaq lazımdır.
+
+### 6. Track 2 (LTTTA) · — · ayrı $6k · —
+Ayrı mükafat, **ayrı gündəlik submission**, kod bazamızın ~80%-i köçür.
+Əlavə lazım olan: `ttt_step` örtüyü + onlayn adaptasiya siyasəti.
+
+---
+
+## İstifadəçi ideyaları — qiymətləndirmə
+
+### A. Fiziki dayanıqsızlıq naxışlarını training-ə əlavə etmək
+*(Kelvin–Helmholtz, Rayleigh–Taylor, firehose, mirror)*
+
+**Dəqiqləşdirmə — dörddən yalnız biri bu axında var:**
+| | var? | səbəb |
+|---|---|---|
+| **Kelvin–Helmholtz** | ✅ **üstündür** | profilin shear təbəqələri məhz KH ilə burulğana çevrilir |
+| Rayleigh–Taylor | ❌ | sıxlıq təbəqələnməsi + təcil tələb edir; təkfazalı suda yoxdur |
+| Firehose | ❌ | **plazma** dayanıqsızlığı (anizotrop təzyiq + maqnit sahə) |
+| Mirror | ❌ | eyni — plazma fizikası |
+
+**Müsbət:** fikrin nüvəsi doğrudur — modelə fiziki quruluşu öyrətmək.
+**Mənfi:** bizim data **onsuz da KH ilə doludur** (100 rejim, 100k kadr). Kənar KH
+simulyasiyaları hədəfdən **daha uzaq** olardı, halbuki eyni konfiqurasiyalı sim
+data-mız cəmi **+0.25** verdi.
+**Diaqnoz dəstəkləmir:** model naxışı **tanıyır** — dalğalanma korrelyasiyası 0.63,
+TKE xəritəsi düzgün yerlərdə. Uğursuzluq **fazadadır**: korrelyasiya 20 kadrda
+0.86 → 0.55 çürüyür. Bu, xaosdur, tanınma problemi deyil.
+**Gözlənilən:** **~0**. Absurd deyil, sadəcə problemimizə dəymir.
+**İşləyə bilən variantı:** KH-i əlavə data kimi yox, **köməkçi tapşırıq** kimi —
+model eyni anda burulma/shear təbəqəsinin yerini proqnozlaşdırsın. Ucuzdur (saatlar),
+gözlənilən **+0…1**.
+
+### B. Çoxlu simulyasiyada pretrain
+**Artıq edilir.** sim = **100 fərqli iş rejimi** (20 Re × 5 AoA), 100 000 kadr,
+hamısında pretrain olunur (`sim_pretrain` → `adv_finetuned`). Qazanc **+0.25**.
+
+**Genişləndirilmiş variantı:** başqa PDE datasetlərində pretrain (PDEBench, PDEArena) —
+"PDE foundation model" yanaşması. RealPDEBench-in `DPOT` baseline-ı məhz budur.
+**Müsbət:** qat-qat çox data; ümumi operator quruluşu öyrənilə bilər.
+**Mənfi:** başqa həndəsə, sərhəd şərtləri, ayırdetmə; onlarla GB endirmə;
+**eyni konfiqurasiyalı sim cəmi +0.25 verdisə, uzaq data daha az verər.**
+**Gözlənilən:** **+0…1**, xərci yüksək.
 
 ## Əmrlər
 ```powershell
