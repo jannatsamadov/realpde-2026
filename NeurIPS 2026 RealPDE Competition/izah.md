@@ -1247,6 +1247,93 @@ kalibrləməsindən** gəlir və o texnika **istənilən modelə** tətbiq oluna
 
 ---
 
+## 6x. ⭐ PIV ŞUMU — `tke_score`-un FİZİKİ TAVANI (16 avqust)
+
+`scripts\noise_and_regime.py`
+
+PIV sürəti səpilən zərrəciklərin yerdəyişməsindən **çıxarır**, ona görə hədəfin
+özündə ölçmə şumu var. Bu, `tke_score` üçün kritikdir: TKE **zaman dispersiyasıdır**,
+şum isə dispersiyaya girir → hədəf TKE-nin bir hissəsi **prinsipcə proqnozlaşdırıla
+bilməz**.
+
+### Üsul
+50 Hz-də fiziki dalğalanma ardıcıl kadrlarda korrelyasiyalıdır, ölçmə şumu isə yox:
+```
+r₁ = var_siqnal / (var_siqnal + var_şum)   →   şum payı = 1 − r₁
+```
+
+### Nəticə
+| bölgə | şum payı (`u`) | şum payı (`v`) |
+|---|---|---|
+| wake (yüksək TKE) | 13.9% | 13.5% |
+| sərbəst axın (aşağı TKE) | 35.3% | 28.7% |
+| **bütün ölçülən xanalar** | **23.9%** | **20.2%** |
+
+→ **Hədəfin zaman dispersiyasının ~22%-i ölçmə şumudur.**
+→ **`tke_score`-un tavanı 100 yox, ~90-dır.** Biz 76.3-dəyik → real boşluq **14 xal**.
+
+⚠️ Bu, şumun **yuxarı həddidir** — bir kadrdan qısa müddətdə korrelyasiyasını itirən
+həqiqi dalğalanma da şum kimi sayılır.
+
+### Bu, "90 mümkündürmü" hesabını dəyişir
+Əvvəl "tke ~92 lazımdır" yazmışdım — **92 fiziki olaraq əlçatmazdır**.
+Yeni hesab: `rel_l2 ~97 · tke ~88 · mvpe ~97 · time ~93 · sps ~60 → final 90.8`.
+Yəni mümkündür, amma **üç metrikanı eyni anda tavana yaxın** aparmaq lazımdır.
+
+---
+
+## 6y. Model rejimi tuturmu — BƏLİ (16 avqust)
+
+Modelə **nə Re, nə AoA verilir** (`metadata` boşdur). Rejimi giriş pəncərəsindən
+özü oxumalıdır. Ölçüldü:
+
+| | həqiqət | model |
+|---|---|---|
+| `corr(Re, TKE)` | +0.685 | **+0.649** |
+| `corr(AoA, TKE)` | +0.346 | **+0.372** |
+| `corr(həqiqi TKE, proqnoz TKE)` pəncərə səviyyəsində | — | **+0.969** |
+
+| Re | həqiqi TKE | proqnoz TKE | saxlanan |
+|---|---|---|---|
+| 6306 | 5.36e-02 | 3.13e-02 | 0.584 |
+| 13977 | 2.06e-01 | 1.21e-01 | 0.590 |
+| 22926 | 6.02e-01 | 3.24e-01 | 0.538 |
+
+**Model "harada və nisbətən nə qədər" bilir** (pəncərə korrelyasiyası 0.969),
+**"mütləq nə qədər" bilmir** — ardıcıl olaraq ~45% az verir (MSE hamarlaşdırması).
+
+### Bu, `α` təcrübəsinin nəticəsini izah edir
+Pəncərə səviyyəsində korrelyasiya 0.969, amma **xana səviyyəsində** yerləşdirmə
+qüsurludur. Amplitudanı qaldıranda xana səviyyəsindəki səhvlər də böyüyür →
+`α = 1.15`-dən sonra TKE **düşür**. TKE metrikası xana səviyyəli nisbi L2-dir,
+pəncərə cəmi deyil.
+
+---
+
+## 6z. Hibrid fizika yanaşması — artıq tətbiq olunub
+
+Sual: "kiçik model + fizika bilikləri" işləyərmi?
+**Cavab: bizim model onsuz da budur və işləyir.**
+
+| model | parametr | seçim |
+|---|---|---|
+| bizim `adv_finetuned` | **1.8M** | **89.70** |
+| rəsmi CNO | 8.0M | 89.31 |
+| rəsmi Transolver | 12.5M | 86.37 |
+
+Modelin girişində: daşınma prioru (`advect_sequence`, fırlanma daxil), burulma,
+divergensiya, `|V|`, mütləq koordinatlar. Yəni **4–7× kiçik modellə** iki rəsmi
+baseline-ı keçirik.
+
+**Daha çox fizikanın gözlənilən faydası azdır**, səbəbi ölçülüb: uğursuzluq
+**xaosdadır** — korrelyasiya 20 kadrda 0.86 → 0.55 çürüyür. Fizika bunu düzəltmir,
+çünki Navier-Stokes-un özü xaotikdir.
+
+**Sərt fiziki şərt qoymaq YANLIŞ olardı:** divergensiya sıfır deyil (burulmanın
+51%-i, bölmə 6l), çünki müstəvi 3D axının kəsiyidir.
+
+---
+
 ## 7. Plan
 
 ### Həftə 1 — infrastruktur

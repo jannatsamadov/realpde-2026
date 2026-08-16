@@ -67,6 +67,9 @@ def main() -> None:
     ap.add_argument("--train-windows", type=int, default=1200,
                     help="training windows sampled to fit sigma (they overlap heavily)")
     ap.add_argument("--out", type=Path, default=ROOT / "checkpoints" / "sps_sigma.npz")
+    ap.add_argument("--alpha", type=float, default=1.0,
+                    help="amplitude correction the submission applies; sigma must "
+                         "be fitted to the corrected prediction, not the raw one")
     args = ap.parse_args()
 
     state = torch.load(args.checkpoint, map_location="cpu")
@@ -79,12 +82,22 @@ def main() -> None:
     print(f"checkpoint {args.checkpoint.name}")
     print(f"fitting sigma on {args.train_windows} of {len(train)} training windows\n")
 
+    def alpha_correct(p):
+        if args.alpha == 1.0:
+            return p
+        m = p.mean(axis=1, keepdims=True)
+        return m + args.alpha * (p - m)
+
     xt, pt, yt = predict_all(model, train, max_windows=args.train_windows)
+    pt = alpha_correct(pt)
     sigma_map = (pt - yt).std(axis=0, keepdims=True)        # (1, T, H, W, C)
     train_energy = float(energy(xt).mean())
 
     xv, pv, yv = predict_all(model, val)
+    pv = alpha_correct(pv)
     scored = yv != 0.0
+    if args.alpha != 1.0:
+        print(f"amplitude correction alpha = {args.alpha} applied before fitting sigma\n")
 
     print(f"{'estimator':<34}{'sps':>8}{'coverage':>11}{'mean width':>12}")
     print("-" * 65)
