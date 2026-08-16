@@ -1334,6 +1334,176 @@ baseline-ı keçirik.
 
 ---
 
+## 6aa. ⚠️ 3-cü SUBMISSION — POST-HOC DÜZƏLİŞLƏR KÖÇMÜR (16 avqust)
+
+`adv_v3.zip` = eyni `adv_finetuned` modeli + `α = 1.15` + bantlar 1.49× genişləndirilmiş.
+
+| subscore | v2 | **v3** | fərq |
+|---|---|---|---|
+| rel_l2 | 94.547 | 94.424 | −0.12 |
+| tke | 74.631 | 74.802 | +0.17 |
+| mvpe | 93.487 | 93.487 | 0.00 |
+| time | 87.153 | 86.916 | −0.24 |
+| sps | 36.170 | 36.334 | +0.16 |
+| **final** | **78.766** | **78.744** | **−0.02** |
+
+### Hər iki proqnoz yanlış çıxdı
+| dəyişiklik | proqnoz | faktiki |
+|---|---|---|
+| `α = 1.15` → tke | **+1.2** | **+0.17** |
+| bantlar ×1.49 → sps | **+1.9** | **+0.16** |
+| final | +0.85 | **−0.02** |
+
+### Səbəb (ortaqdır)
+**İkisi də bizim validation split-imizdə tənzimlənmişdi və gizli setə köçmədi.**
+- `α = 1.15` bizim split-in dalğalanma quruluşuna uyğunlaşdırılmışdı
+- 1.49 əmsalı **bir** submission-un subscore-larından, **Gauss fərziyyəsi** ilə
+  çıxarılmışdı. Qalıqlar ağır quyruqludursa, bantı genişləndirmək örtməni
+  gözlənilən sürətlə artırmır — faktiki nəticə bunu göstərir.
+
+### ⭐ DƏRS
+**Öz split-imizdə tənzimlənən post-hoc düzəlişlər gizli setdə işləmir.**
+İki müstəqil təcrübə, eyni nəticə. Növbəti addım **əsl model təkmilləşdirməsi**
+olmalıdır, parametr tənzimləməsi yox.
+
+Müqayisə üçün: **v2-nin qazancı (73.66 → 78.77) model+bant kalibrləməsindən idi** —
+yəni struktur dəyişiklik köçdü, incə tənzimləmə köçmədi.
+
+---
+
+## 6bb. ❌ GENERATİV MODEL (flow matching) — UĞURSUZ, iki dizaynda (16 avqust)
+
+`src\realpde\flow.py`, `scripts\train_flow.py`
+
+### Niyə flow matching, DDPM yox
+`time_score` sürətə görə verilir. DDPM 50+ addım (~40 ms, `time_score` ~78),
+flow matching **4-8 addım** (4.5 ms). Ölçüldü: 6 addım = 4.52 ms.
+
+### Dizayn A — təmiz şumdan generasiya
+```
+z ~ N(0,1)  ──►  həqiqi dalğalanma        (yalnız dalğalanma, orta axın deterministik)
+```
+| epoxa | rel_l2 | tke |
+|---|---|---|
+| 5 | 88.79 | 30.44 |
+| 10 | 90.45 | 40.34 |
+| 15 | 91.26 | 45.76 |
+| 20 | 91.82 | 49.97 |
+
+20-ci epoxada dayandırıldı. Proqnoz 40-cı epoxa: `tke ≈ 60`, lazım olan **79**.
+
+⚠️ **Yol boyu tapılan səhv (mənim):** flow şumdan (`std = 1`) hədəfə interpolyasiya
+edir, amma dalğalanmanın std-i **0.443** idi. `t < 0.5` diapazonunda `x_t`-də siqnal
+payı **11%-dən az** olur → model faktiki olaraq təsadüfi şumu proqnozlaşdırmağa
+çalışır. Düzəliş (hədəfi öz std-inə bölmək) eyni epoxada **TKE-ni üç dəfə** qaldırdı
+(11.27 → 30.44).
+
+### Dizayn B — deterministik təxminden başlayaraq təkmilləşdirmə
+İstifadəçinin ideyası: sıfırdan struktur icad etmə, mövcud strukturu düzəlt.
+```
+det. dalğalanma + 0.5·şum  ──►  həqiqi dalğalanma
+```
+Əlavə: burulma, divergensiya, `|V|`, koordinatlar da flow modelinə verildi
+(dizayn A-da onlar yox idi — mənim boşluğum).
+
+| epoxa | rel_l2 | tke | (dizayn A-da tke) |
+|---|---|---|---|
+| 5 | 92.97 | **59.10** | 30.44 |
+| 10 | 93.97 | 68.00 | 40.34 |
+| 15 | 94.44 | 71.69 | 45.76 |
+| 20 | 94.65 | 73.19 | 49.97 |
+| 30 | 94.90 | 74.67 | — |
+| **40** | **94.95** | **74.91** | — |
+
+**Dizayn B dizayn A-dan qat-qat yaxşıdır**, amma yenə də deterministik modeli keçmir:
+
+| | deterministik | generativ (B) |
+|---|---|---|
+| rel_l2 | **96.25** | 94.95 |
+| tke | **76.32** | 74.91 |
+| mvpe | **96.54** | 96.14 |
+| time | **91.41** | 86.21 |
+| **seçim** | **89.70** | **88.67** |
+
+**Heç bir metrikada üstün deyil.**
+
+### ⭐ ÜÇ SƏBƏB — və hamısı tapşırığın özündədir, dizaynda yox
+
+**1. Şum tavanı.** Hədəf TKE-nin **22%-i ölçmə şumudur** (bölmə 6x). Generativ model
+onu da modelləşdirməyə çalışır — mümkün olmayan hədəf, boş yerə capacity.
+
+**2. Metrikanın quruluşu.** `tke_score` **xana səviyyəli** nisbi L2-dir, pəncərə cəmi
+deyil. "Statistik düzgün, amma yerində səhv" dalğalanma cəzalandırılır.
+**Metrika hamar proqnozu mükafatlandırır** — generativ modelin bütün üstünlüyünün
+əksi.
+
+**3. Xaos.** 0.4 s üfüqdə faza korrelyasiyası 0.86 → 0.55 çürüyür. Generativ model
+bunu düzəldə bilməz, çünki məlumat girişdə yoxdur.
+
+### SPS-də gözlənilməz nəticə
+`acc = 0.5(1−pm_rel_l2) + 0.3(1−pm_tke) + 0.2(1−pm_mvpe)`:
+```
+deterministik  acc = 0.7414
+generativ      acc = 0.7311    ← DAHA AŞAĞI
+```
+`rel_l2` **0.5 çəki** ilə girir, `tke` yalnız **0.3**. Generativ variant `rel_l2`-də
+itirdiyi `tke`-də qazandığından çoxdur → **SPS tavanı da düşür.**
+
+**Nəticə: generativ istiqamət bu tapşırıq üçün bağlıdır.** Daha yaxşı generativ
+model qurmaq problemi həll etmir, çünki maneə metrikanın və datanın quruluşundadır.
+
+---
+
+## 6cc. Axının struktur təhlili — Q-kriteriyası və tökülmə tezliyi (16 avqust)
+
+`scripts\vortex_structure.py` → `figures\vortex_q_*.png`, `figures\wake_scales_*.png`
+**Yalnız təhlil — modelə tətbiq edilməyib.**
+
+### Koherent burulğan vs deformasiya — **Q-kriteriyası**
+Sürət qradiyenti tenzoru ikiyə ayrılır:
+```
+S = (∇u + ∇uᵀ)/2   deformasiya (strain) — maye elementlərini dartıb ayırır
+W = (∇u − ∇uᵀ)/2   fırlanma (rotation)
+Q = ½(‖W‖² − ‖S‖²)
+```
+`Q > 0` → koherent burulğan, maye **birlikdə hərəkət edir**, struktur bütöv qalır.
+`Q < 0` → struktur **dartılıb parçalanır**, qonşu zərrəciklər ayrılır.
+
+**Vahid burulma (vorticity) bunu ayırd edə BİLMİR** — adi shear təbəqəsində burulma
+böyükdür, amma koherent nüvə yoxdur.
+
+**Ölçüldü (Re 20369, AoA 15°):** ölçülən xanaların yalnız **14.6%-i
+fırlanma-dominantdır.** Şəkildə vorticity qalın davamlı zolaqlar göstərir, Q isə
+həmin zolaqları **mavi** (deformasiya) çıxarır. Yəni bu axında **səpilmə rejimi
+üstündür**, koherent burulğanlar azlıqdadır.
+
+### Struktur ölçüsü downstream artırmı — **vorteks birləşməsi (pairing)**
+⚠️ İlk üsulum səhv idi: eninə (spanwise) spektr ölçdüm, amma eninə ölçü cəmi
+10.8 sm-dir və wake onun çoxunu tutur → spektr həmişə ən böyük miqyasda pik verir.
+Düzgün ölçü **tökülmə tezliyidir** (birləşmə tezliyi yarıya salır).
+
+**Nəticə: tezlik DÜŞMÜR** — x = 14 sm-dən sonra **3.08 Hz-də sabit**.
+
+Doğruluq yoxlaması (Strouhal):
+```
+U∞ = 20369 × 1.394e-5 = 0.284 m/s
+h = c·sin(15°) = 0.072 × 0.259 = 0.0186 m
+St = f·h/U = 3.08 × 0.0186 / 0.284 = 0.202
+```
+**St = 0.202**, küt cisim tökülməsi üçün klassik dəyər **0.2** → ölçmə düzgündür.
+
+Dalğa uzunluğunun x=14-dən sonra 2→6 sm artması **birləşmədən deyil**: `λ = U/f`,
+tezlik sabitdir, sadəcə **U downstream artır**. Wake eni də genişlənmir (korr −0.07).
+
+**Səbəb ehtimalla görmə sahəsinin qısalığıdır:** 22 sm ≈ 3 vətər.
+
+### Sınanmamış ideya
+`Q` sahəsi **proqnozlaşdırıla bilənliyin göstəricisi** ola bilər — koherent
+burulğanlar bütöv hərəkət etdiyi üçün daha proqnozlaşdırılan, deformasiya zonaları
+isə xaotik. Modelin xətasının `Q` ilə korrelyasiyasına baxmaq bir neçə dəqiqəlik işdir.
+
+---
+
 ## 7. Plan
 
 ### Həftə 1 — infrastruktur

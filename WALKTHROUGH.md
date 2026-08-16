@@ -33,7 +33,9 @@ Bantları mükəmməl etsək belə `final = 88.6`. **90 üçün `tke` ~92 lazım
 | sim pretrain → real finetune | ✅ 89.46 → **89.70** (ən yaxşı) |
 | model böyütmək (base 64→128) | ❌ +0.13, 4× ölçü — dəyməz |
 | **SPS bant kalibrləməsi** | ✅✅ **22.96 → 48.74** (lokal), lövhədə 16.6 → 36.2 |
-| `α` amplituda düzəlişi (1.15) | ~ +0.27, kiçik |
+| `α` amplituda düzəlişi (1.15) | ❌ lokalda +1.2 tke, lövhədə **+0.17** — köçmədi |
+| bantları 1.49× genişlətmək | ❌ lokalda proqnoz +1.9 sps, lövhədə **+0.16** |
+| **generativ flow matching** (2 dizayn) | ❌ **heç bir metrikada üstün deyil** |
 
 ## Modellər (273 val pəncərəsi, hamısı default bandla)
 | model | parametr | rel_l2 | tke | mvpe | seçim |
@@ -68,14 +70,19 @@ FNO dəqiqlikdə bizi keçir (90.64 vs 89.70) → SPS tavanı da yüksəkdir.
 **Decision Phase-də təşkilatçılar metodu sıfırdan öyrədir** — hazır checkpoint
 üzərində qurulmuş həll orada zəif görünə bilər.
 
-### 3. Generativ / diffusion model · günlər · **+8…12 potensial** · **qeyri-müəyyən**
-`tke` 92-yə çatmağın yeganə real yolu. MSE şərti ortanı öyrədir → hamar proqnoz →
-TKE ölür. Diffusion bu problemin standart cavabıdır; RealPDEBench-in `WDNO`
-baseline-ı da bu ailədəndir.
-**Müsbət:** yeganə yol ki, tavana aparır; Decision Phase üçün də düzgün həlldir.
-**Mənfi:** bir neçə gün; `time_score` çox düşə bilər (diffusion çox addım tələb edir);
-nəticə **zəmanətsizdir**.
-**Qeyd:** az addımlı variant (consistency / flow-matching) sürət problemini yumşaldır.
+### 3. ❌ Generativ / diffusion — SINANDI, UĞURSUZ
+İki dizayn (şumdan generasiya, deterministikdən təkmilləşdirmə), flow matching ilə.
+Yekun: `rel_l2 94.95 · tke 74.91 · mvpe 96.14 · time 86.21` — deterministik modelin
+(`96.25 · 76.32 · 96.54 · 91.41`) **heç bir metrikasını keçmədi**.
+
+Üç səbəb, hamısı **tapşırığın quruluşundadır**, dizaynda yox:
+1. hədəf TKE-nin **22%-i ölçmə şumudur** — modelləşdirilə bilməz
+2. `tke_score` **xana səviyyəli** nisbi L2-dir → "statistik düzgün, yerində səhv"
+   dalğalanma cəzalanır; **metrika hamar proqnozu mükafatlandırır**
+3. 0.4 s üfüqdə faza korrelyasiyası 0.86 → 0.55 çürüyür (xaos)
+
+Üstəlik SPS-in `acc` əmsalı **düşür** (0.7414 → 0.7311), çünki `rel_l2` orada
+0.5 çəki ilə, `tke` isə 0.3 ilə girir. Detallar: `izah.md` bölmə 6bb.
 
 ### 4. Ehtimallı çıxış (multi-sample) · 1–2 gün · **+3…6** · orta
 Model tək proqnoz yox, **paylanma** versin. Eyni anda iki metrikaya işləyir:
