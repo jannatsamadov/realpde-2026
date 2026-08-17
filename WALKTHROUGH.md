@@ -99,6 +99,67 @@ Bantları mükəmməl etsək `final = 88.6`. **90 üçün** təxminən
 `final_score` düsturu **açıqlanmayıb**. İki submission-dan uyğun bir həll:
 `w_sps ≈ 0.30`, digərləri ≈ 0.19 — yəni SPS bərabər paydan artıq çəkidədir.
 
+## İSTİFADƏÇİ İDEYALARI — hamısı, statusu ilə
+
+### ✅ İşlədi
+- **"Əvvəl vizuallaşdıraq, GIF edək, oxlarla göstərək"** — bütün işin əsasını qurdu.
+  Sim/real fərqini, maskanı, TKE problemini məhz şəkillərdə gördük. İndi hər model
+  üçün standart addımdır.
+- **"Sim və real şəkillərini yan-yana qoy"** — `U∞` miqyas fərqini açdı
+  (sim ölçüsüz, real m/s). Bu tapılmasaydı sim pretrain 7× uyğunsuzluqla işləyəcəkdi.
+- **"Daşınmanı ilk qurduğun modellə birləşdir"** — daşınma tək başına uğursuz idi,
+  amma **şəbəkənin girişi** kimi işlədi: 89.17 → 89.46.
+- **"Diffusion şumdan yox, birinci modelin tapdığı strukturdan başlasın"** —
+  dizaynı **iki dəfə** yaxşılaşdırdı (5-ci epoxada tke 30.44 → 59.10). Yenə də
+  deterministik modeli keçmədi, amma səhv dizaynı düzəltdi.
+- **"Zərrəciklər səpiləndə küy artır"** — ölçüldü, **doğru çıxdı**: ən yüksək
+  deformasiya kvintilində şum ən aşağıdan **9.9×** çox. Bu tapıntı şum
+  augmentasiyasının əsasını verdi.
+
+### ❌ Yoxlandı, işləmədi
+- **"Deformasiyaya görə bantları genişləndirək"** — fizika doğru, amma `sigma`
+  xəritəsi məkan quruluşunu **onsuz da daxil edir** → ikiqat sayma, 48.67 → 43.83.
+- **"Dalğa uzunluğu mənbədən uzaqlaşdıqca artır"** — ölçüldü, **artmır**. Tökülmə
+  tezliyi 3.08 Hz-də sabitdir, yəni **vorteks birləşməsi yoxdur**. Dalğa
+  uzunluğunun artması yalnız `U`-nun downstream artmasındandır. (St = 0.202,
+  klassik 0.2 — ölçmə düzgündür.)
+
+### ⚠️ Artıq edilir / yanlış fərziyyə
+- **"Çoxlu simulyasiyada pretrain edək"** — **artıq belədir**: 100 fərqli rejim
+  (20 Re × 5 AoA), hamısında pretrain. Qazanc +0.25.
+- **"Eyni Re üçün fərqli AoA-ları qruplaşdırıb öyrədək"** — **artıq belədir**:
+  training-də bütün 68 case qarışdırılıb verilir, hər batch fərqli rejimlərdən.
+- **"Real datada Re və AoA-nı modelə verək"** — **mümkün deyil**: submission-da
+  `metadata` boşdur. Versək, model onlara güvənər və test vaxtı dayaqsız qalar.
+- **"Model 3D qavramır"** — ölçüldü, **qavrayır**: `corr(həqiqi TKE, proqnoz TKE)
+  = 0.969`, ona Re/AoA deyilmədən. Problem qavramada yox, xaotik fazadadır.
+- **"Fərdi zərrəcik sürətlərinə baxaq"** — **data yoxdur**. PIV bizə zərrəcikləri
+  yox, artıq ortalanmış **sahəni** verir. Fərdi izləmə üçün xam PIV şəkilləri
+  lazımdır, onlar yarışın datasında yoxdur.
+
+### 🔲 Sınanmayıb — növbəti namizədlər
+- **Şum augmentasiyası** (bu ideyanın davamı) — kod **hazırdır**, GPU münaqişəsinə
+  görə işə salınmayıb. Sim-də hədəf təmiz olduğu üçün model şumu **daxildə
+  təmizləməyi** öyrənə bilər. Ölçmə bunu dəstəkləyir: deformasiyaya görə şum
+  bərabər şumdan **iki dəfə** çox zərər verir (−0.225 vs −0.098).
+- **Zaman tərsinə axın** — fizikaya ziddir (özlü axında dönməzdir), amma modelə
+  axının **geri dönməsini** də göstərmək öyrənməni gücləndirə bilər. Bir növ
+  augmentasiya. Sınanmayıb, ucuzdur.
+- **Q-kriteriyasını girişə əlavə etmək** — həqiqətən **yeni məlumatdır**
+  (burulma + divergensiya ondan hesablanmır), amma gözlənilən qazanc kiçikdir,
+  çünki oxşar kanallar +0.29 vermişdi.
+- **Vision model şumu/fərdi zərrəcikləri ayrıca izləsin** — cəlbedicidir, amma
+  xam PIV şəkilləri olmadan bunu qurmaq mümkün deyil. Yalnız təşkilatçılar xam
+  data buraxsa.
+- **Re/AoA-nı köməkçi hədəf kimi** — girişə vermək olmaz, amma **əlavə çıxış**
+  kimi öyrətmək olar (inference-də atılır). Ucuz, gözlənilən kiçik.
+- **300 epoxa** — əyri yastılanıb (+0.045 son addımda), cəmi ~+0.2…0.4 gələr,
+  əvəzində 3.5 saat GPU. Nisbət zəifdir.
+- **Fiziki dayanıqsızlıq naxışları əlavə etmək** — dörd dayanıqsızlıqdan yalnız
+  **Kelvin–Helmholtz** bu axında var, o da datada onsuz da boldur. Rayleigh–Taylor
+  sıxlıq təbəqələnməsi tələb edir (yoxdur), firehose və mirror **plazma**
+  dayanıqsızlıqlarıdır (aid deyil).
+
 ## Növbəti seçimlər
 1. **Track 2 (LTTTA)** — ayrı $6k, ayrı gündəlik submission, kodun ~80%-i köçür.
    Əlavə: `ttt_step` örtüyü + onlayn adaptasiya siyasəti.

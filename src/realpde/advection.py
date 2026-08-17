@@ -154,6 +154,53 @@ def advect_frozen(field_u: torch.Tensor, field_v: torch.Tensor,
     return moved.reshape(b, n_steps, 2, h, w).permute(0, 1, 3, 4, 2)  # (B, n, H, W, 2)
 
 
+def strain_rate(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Frobenius norm of the in-plane strain-rate tensor. (..., H, W) -> same.
+
+    How much neighbouring fluid is being pulled apart rather than rotated. It is
+    also where PIV is least reliable: within one interrogation window, particles
+    moving at different speeds broaden the correlation peak. Measured on this
+    data, absolute noise in the top strain quintile is 9.9x the bottom quintile.
+    """
+    dudx = torch.gradient(u, spacing=DX_EVAL, dim=-1)[0]
+    dvdx = torch.gradient(v, spacing=DX_EVAL, dim=-1)[0]
+    dudy = torch.gradient(u, spacing=-DX_EVAL, dim=-2)[0]
+    dvdy = torch.gradient(v, spacing=-DX_EVAL, dim=-2)[0]
+    s12 = 0.5 * (dudy + dvdx)
+    return torch.sqrt(dudx ** 2 + dvdy ** 2 + 2.0 * s12 ** 2 + 1e-12)
+
+
+def strain_scaled_noise(x: torch.Tensor, fraction: float, power: float = 0.8,
+                        generator: torch.Generator | None = None) -> torch.Tensor:
+    """Noise shaped like PIV error: proportional to the local strain rate.
+
+    `x` is (B, T, H, W, C) in normalized units; the returned tensor is the same
+    shape and should be ADDED to the input.
+
+    White noise of the same total energy costs about half as much forecast skill,
+    because real PIV error concentrates in the wake where the strain is high —
+    exactly the region that carries the signal. Injecting it uniformly would
+    train the model against the wrong corruption.
+
+    `power` shapes how sharply the noise follows the strain. Weighting linearly
+    over-concentrates: it produces about 20x more noise in the top strain decile
+    than the bottom, where the real data shows 9.9x across quintiles. 0.8 matches
+    the measured relationship; 0 gives white noise.
+
+    The weight field is renormalised to unit mean square, so `fraction` means the
+    same total injected energy regardless of how the strain happens to be
+    distributed in a given batch.
+    """
+    if fraction <= 0.0:
+        return torch.zeros_like(x)
+    s = strain_rate(x[..., 0], x[..., 1]).unsqueeze(-1)      # (B,T,H,W,1)
+    s = s ** power
+    w = s / torch.sqrt((s ** 2).mean().clamp_min(1e-12))
+    fluct_sd = (x - x.mean(dim=1, keepdim=True)).std()
+    z = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+    return fraction * fluct_sd * w * z
+
+
 def derived_channels(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Physically meaningful fields the network would otherwise have to derive.
 

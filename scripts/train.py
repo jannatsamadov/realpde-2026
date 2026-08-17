@@ -33,6 +33,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from realpde.advection import strain_scaled_noise
 from realpde.data import build_datasets, denormalize
 from realpde.local_score import format_scores, score_arrays
 from realpde.losses import CompositeLoss
@@ -131,6 +132,11 @@ def main() -> None:
     ap.add_argument("--w-tke", type=float, default=0.0)
     ap.add_argument("--w-mvpe", type=float, default=0.0)
     ap.add_argument("--train-stride", type=int, default=10)
+    ap.add_argument("--noise-aug", type=float, default=0.0,
+                    help="strain-scaled noise added to the INPUT during training, "
+                         "as a fraction of the input's fluctuation sd. Teaches the "
+                         "model to denoise: most useful on the simulated split, "
+                         "whose targets are clean. 0 disables it.")
     ap.add_argument("--gpu-duty", type=float, default=0.72,
                     help="target GPU duty cycle; the fan on this machine is dead")
     ap.add_argument("--max-temp", type=float, default=78.0,
@@ -195,6 +201,14 @@ def main() -> None:
             t0 = time.perf_counter()
             x = batch["input"][..., :use_channels].to(device, non_blocking=True)
             y = batch["target"][..., :use_channels].to(device, non_blocking=True)
+
+            # Corrupt the input, keep the target. On the simulated split the
+            # target is genuinely clean, so this teaches denoising outright;
+            # measured on this data, strain-scaled noise costs roughly twice the
+            # forecast skill that white noise of the same energy does, so it is
+            # the corruption worth training against.
+            if args.noise_aug > 0:
+                x = x + strain_scaled_noise(x, args.noise_aug)
 
             opt.zero_grad(set_to_none=True)
             loss, parts = criterion(model(x), y)
