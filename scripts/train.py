@@ -28,11 +28,16 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# The shared GPU lock lives one level up, beside the other competitions, so every
+# project claims the same card through the same file.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from gpu_guard import Governor, gpu_status
+from gpu_lock import GpuLock
 from realpde.advection import strain_scaled_noise
 from realpde.data import build_datasets, denormalize
 from realpde.local_score import format_scores, score_arrays
@@ -43,49 +48,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CKPT_DIR = ROOT / "checkpoints"
 
 
-def gpu_query() -> tuple[float, float, float] | None:
-    """(utilization %, temperature C, power W), or None if nvidia-smi is unavailable."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-        u, t, p = (float(s.strip()) for s in out.split(","))
-        return u, t, p
-    except Exception:
-        return None
-
-
-def gpu_status() -> str:
-    q = gpu_query()
-    return "gpu n/a" if q is None else f"gpu {q[0]:.0f}%  {q[1]:.0f}C  {q[2]:.0f}W"
-
-
-def thermal_guard(max_temp: float, resume_temp: float, quiet: bool = False) -> bool:
-    """Block while the GPU is above max_temp. Returns True if it had to wait.
-
-    The fan on this machine does not work, so a duty cycle alone is not enough:
-    if the card is already hot when training starts, throttling to 60% still lets
-    it climb. This pauses outright until it has cooled to resume_temp.
-    """
-    q = gpu_query()
-    if q is None or q[1] < max_temp:
-        return False
-    waited = 0.0
-    if not quiet:
-        print(f"\n  !! GPU at {q[1]:.0f}C (limit {max_temp:.0f}C) — pausing to cool", flush=True)
-    while True:
-        time.sleep(5.0)
-        waited += 5.0
-        q = gpu_query()
-        if q is None or q[1] <= resume_temp:
-            break
-        if waited % 30 == 0 and not quiet:
-            print(f"     still {q[1]:.0f}C after {waited:.0f}s", flush=True)
-    if not quiet:
-        print(f"  resumed after {waited:.0f}s at {q[1] if q else float('nan'):.0f}C\n", flush=True)
-    return True
+def gpu_line() -> str:
+    """One-line card state for the epoch log."""
+    u, t, m = gpu_status()
+    return "gpu n/a" if t is None else f"gpu {u}%  {t}C  {m}MiB"
 
 
 @torch.no_grad()
@@ -146,6 +112,9 @@ def main() -> None:
     ap.add_argument("--init-from", type=str, default=None)
     ap.add_argument("--tag", type=str, default="run")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--wait-for-gpu", action="store_true",
+                    help="queue behind whatever holds the shared GPU lock instead "
+                         "of refusing to start")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -173,7 +142,7 @@ def main() -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     criterion = CompositeLoss(args.w_mse, args.w_tke, args.w_mvpe)
 
-    print(f"\ndevice {device}   {gpu_status()}")
+    print(f"\ndevice {device}   {gpu_line()}")
     print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
     print(f"data   {args.split}: {len(train_ds)} train / {len(val_ds)} val windows")
     print(f"loss   mse={args.w_mse} tke={args.w_tke} mvpe={args.w_mvpe}")
@@ -181,53 +150,59 @@ def main() -> None:
           f"(fan is dead — deliberate throttle)\n")
 
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # The governor duty-cycles and backs off near the ceiling; the lock keeps a
+    # second competition's training off the card while this one runs. Both live
+    # in the shared folder so every project uses the same policy.
+    gov = Governor(target_util=int(args.gpu_duty * 100),
+                   pause_temp=args.max_temp, resume_temp=args.resume_temp)
+    lock = GpuLock("realpde", args.tag, wait=args.wait_for_gpu).acquire()
+    try:
+        run(model, opt, sched, criterion, train_loader, val_loader, device,
+            use_channels, args, lock, gov)
+    finally:
+        lock.release()
+
+
+def run(model, opt, sched, criterion, train_loader, val_loader, device,
+        use_channels, args, lock, gov):
+    """The training loop proper, so the lock stays a two-line concern above."""
     best, history = -1.0, []
-    sleep_ratio = max(1.0 / max(args.gpu_duty, 1e-3) - 1.0, 0.0)
-    peak_temp, pauses = 0.0, 0
 
     for epoch in range(1, args.epochs + 1):
+        lock.progress(f"epoch {epoch}/{args.epochs}")
         model.train()
         agg, nb = {}, 0
         t_epoch = time.perf_counter()
-        for step, batch in enumerate(train_loader):
-            # Check the temperature a few times per epoch rather than every step:
-            # nvidia-smi costs ~20 ms, which would dominate a 15 ms training step.
-            if step % 25 == 0:
-                q = gpu_query()
-                if q is not None:
-                    peak_temp = max(peak_temp, q[1])
-                if thermal_guard(args.max_temp, args.resume_temp):
-                    pauses += 1
-            t0 = time.perf_counter()
-            x = batch["input"][..., :use_channels].to(device, non_blocking=True)
-            y = batch["target"][..., :use_channels].to(device, non_blocking=True)
+        for batch in train_loader:
+            with gov.step():
+                x = batch["input"][..., :use_channels].to(device, non_blocking=True)
+                y = batch["target"][..., :use_channels].to(device, non_blocking=True)
 
-            # Corrupt the input, keep the target. On the simulated split the
-            # target is genuinely clean, so this teaches denoising outright;
-            # measured on this data, strain-scaled noise costs roughly twice the
-            # forecast skill that white noise of the same energy does, so it is
-            # the corruption worth training against.
-            if args.noise_aug > 0:
-                x = x + strain_scaled_noise(x, args.noise_aug)
+                # Corrupt the input, keep the target. On the simulated split the
+                # target is genuinely clean, so this teaches denoising outright;
+                # measured on this data, strain-scaled noise costs roughly twice
+                # the forecast skill that white noise of the same energy does, so
+                # it is the corruption worth training against.
+                if args.noise_aug > 0:
+                    x = x + strain_scaled_noise(x, args.noise_aug)
 
-            opt.zero_grad(set_to_none=True)
-            loss, parts = criterion(model(x), y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+                opt.zero_grad(set_to_none=True)
+                loss, parts = criterion(model(x), y)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()   # the governor times real compute
 
             for k, v in parts.items():
                 agg[k] = agg.get(k, 0.0) + float(v)
             nb += 1
 
-            # Hold the duty cycle: idle in proportion to how long the step took.
-            if sleep_ratio > 0:
-                time.sleep((time.perf_counter() - t0) * sleep_ratio)
-
         sched.step()
         line = "  ".join(f"{k} {agg[k] / nb:.5f}" for k in sorted(agg))
         print(f"epoch {epoch:>3}/{args.epochs}  {line}  "
-              f"[{time.perf_counter() - t_epoch:.1f}s, {gpu_status()}]")
+              f"[{time.perf_counter() - t_epoch:.1f}s, {gpu_line()}]")
 
         if epoch % 5 == 0 or epoch == args.epochs:
             scores = evaluate(model, val_loader, device, use_channels)
@@ -244,8 +219,7 @@ def main() -> None:
     (CKPT_DIR / f"{args.tag}_history.json").write_text(json.dumps(history, indent=2))
     print(f"done. best selection score {best:.3f}")
     print(f"checkpoint: {CKPT_DIR / f'{args.tag}_best.pt'}")
-    print(f"thermals: peak {peak_temp:.0f}C, {pauses} cooling pause(s), "
-          f"final {gpu_status()}")
+    print(f"thermals: {gov.summary()}")
 
 
 if __name__ == "__main__":
