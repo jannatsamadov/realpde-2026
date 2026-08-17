@@ -28,3 +28,7 @@ submissions/*/
 
 # Organizer baseline checkpoints, ~460 MB, fetched from the competition data repo
 baselines/
+
+# Personal working notes, not repository content
+WALKTHROUGH.md
+NeurIPS 2026 RealPDE Competition/izah.md
