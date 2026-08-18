@@ -46,22 +46,24 @@ SIGMA_FILE = os.path.join(HERE, "sps_sigma.npz")
 RETURN_BOUNDS = False
 
 # Width multiplier on the analytic optimum, applied after the sigma solve.
-BOUND_SCALE = 1.0
+# 0.8 is the empirical best on validation and is what submission adv_v2 used.
+BOUND_SCALE = 0.8
 
-# Sigma is fitted on our training residuals, but the hidden set's residuals run
-# about 1.49x larger — inferred from submission 2's reported subscores, where the
-# same bands covered 87.6% locally and only 69.8% there. Inflating sigma before
-# the width solve (rather than scaling the width after) respects the concavity of
-# optimal_width: a small sigma needs proportionally more widening than a large one.
-SIGMA_INFLATE = 1.49
-
-# Fluctuation amplitude correction: corrected = mean_t + ALPHA * (pred - mean_t).
-# An MSE-trained model returns the conditional mean and keeps only ~55% of the true
-# fluctuation, so inflating it helps tke_score — but only to a point. The metric is
-# a relative L2 on the TKE *map*, so inflating also amplifies fluctuation the model
-# placed in the wrong cell. Measured optimum is 1.15 (tke 77.51); the theoretical
-# 1/amplitude = 1.354 is worse (75.29) for exactly that reason.
-ALPHA = 1.15
+# BOTH CORRECTIONS BELOW ARE OFF, AND THAT IS THE MEASURED RESULT — NOT AN OVERSIGHT.
+#
+# Sigma is fitted on our training residuals, and the hidden set's residuals looked
+# about 1.49x larger — inferred from submission 2, where the same bands covered
+# 87.6% locally and only 69.8% there. Likewise an MSE-trained model returns the
+# conditional mean and keeps only ~55% of the true fluctuation, so inflating it by
+# ALPHA = 1.15 raised tke from 76.32 to 77.51 locally.
+#
+# Both were shipped together as adv_v3. Local prediction: +1.9 and +1.2.
+# Leaderboard: +0.16 and +0.17 — and adv_v3 finished BELOW adv_v2 overall
+# (78.744 vs 78.766). Post-hoc corrections tuned on our own split do not transfer.
+# Two independent attempts, same outcome. Turn these back on only with a new
+# argument, not a new tuning.
+SIGMA_INFLATE = 1.0
+ALPHA = 1.0
 
 _MODEL = None
 _DEVICE = None

@@ -71,7 +71,8 @@ def imported_modules(path: Path) -> set[str]:
     return names
 
 
-def build(checkpoint: Path, tag: str, return_bounds: bool) -> Path:
+def build(checkpoint: Path, tag: str, return_bounds: bool,
+          sigma_path: Path | None = None) -> Path:
     out_dir = ROOT / "submissions" / tag
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -95,7 +96,10 @@ def build(checkpoint: Path, tag: str, return_bounds: bool) -> Path:
         shutil.copy(src, out_dir / dest)
     text = TEMPLATE.read_text(encoding="utf-8")
     if return_bounds:
-        sigma = ROOT / "checkpoints" / "sps_sigma.npz"
+        # sigma is the model's OWN residual spread, so a map fitted to a
+        # different checkpoint gives the wrong widths. Calibrate per model and
+        # pass the file explicitly rather than sharing one default.
+        sigma = sigma_path or (ROOT / "checkpoints" / "sps_sigma.npz")
         if not sigma.exists():
             raise SystemExit(
                 f"--bounds needs {sigma}; run scripts/calibrate_sps.py first")
@@ -157,11 +161,15 @@ def main() -> None:
     ap.add_argument("--checkpoint", required=True, type=Path)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--bounds", action="store_true", help="return lower/upper for SPS")
+    ap.add_argument("--sigma", type=Path, default=None,
+                    help="sigma map for --bounds, as written by calibrate_sps.py. "
+                         "Must be the one fitted to THIS checkpoint; defaults to "
+                         "checkpoints/sps_sigma.npz")
     ap.add_argument("--max-windows", type=int, default=64)
     args = ap.parse_args()
 
     print(f"[1/5] building from {args.checkpoint}")
-    zip_path = build(args.checkpoint, args.tag, args.bounds)
+    zip_path = build(args.checkpoint, args.tag, args.bounds, args.sigma)
     sub_dir = ROOT / "submissions" / args.tag
     print(f"  wrote {zip_path}")
 
