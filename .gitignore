@@ -42,6 +42,7 @@ submissions/*/
 !submissions/t2_template/
 submissions/t2_template/model.pth
 submissions/t2_template/sps_sigma.npz
+submissions/t2_template/sps_empirical.npz
 submissions/t2_template/model_def.py
 submissions/t2_template/advection.py
 
