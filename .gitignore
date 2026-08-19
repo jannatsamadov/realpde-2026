@@ -24,7 +24,14 @@ figures/*.gif
 # Built submission archives and their unpacked staging directories
 submissions/*.zip
 submissions/*/
+# The templates are source, not build output: everything else under submissions/
+# is a staging directory the build script recreates from them.
 !submissions/template/
+!submissions/t2_template/
+submissions/t2_template/model.pth
+submissions/t2_template/sps_sigma.npz
+submissions/t2_template/model_def.py
+submissions/t2_template/advection.py
 
 # Organizer baseline checkpoints, ~460 MB, fetched from the competition data repo
 baselines/
