@@ -74,13 +74,24 @@ def imported_modules(path: Path) -> set[str]:
     return names
 
 
-def build(checkpoint: Path, sigma: Path, tag: str) -> tuple[Path, Path]:
+def build(checkpoint: Path, sigma: Path, tag: str,
+          sigma_online: str | None = None) -> tuple[Path, Path]:
     out_dir = ROOT / "submissions" / tag
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
 
-    shutil.copy(TEMPLATE_DIR / "submission.py", out_dir / "submission.py")
+    # Variants are applied to the BUILT copy, never to the template. Editing the
+    # template in place is how the Track 1 one silently kept adv_v3's losing
+    # settings, so every later build inherited them.
+    text = (TEMPLATE_DIR / "submission.py").read_text(encoding="utf-8")
+    if sigma_online is not None:
+        needle = 'SIGMA_ONLINE = "scalar"'
+        if needle not in text:
+            raise SystemExit(f"cannot apply --sigma-online: {needle!r} not in template")
+        text = text.replace(needle, f'SIGMA_ONLINE = "{sigma_online}"')
+        print(f"  variant: SIGMA_ONLINE = {sigma_online!r}")
+    (out_dir / "submission.py").write_text(text, encoding="utf-8")
     # Re-vendored from src on every build. A stale copy here once made a timing
     # measurement report an optimisation that was not in the archive.
     for dest, src in VENDORED.items():
@@ -147,11 +158,17 @@ def main() -> None:
     ap.add_argument("--sigma", type=Path,
                     default=ROOT / "checkpoints" / "sps_sigma.npz")
     ap.add_argument("--tag", required=True)
+    ap.add_argument("--sigma-online", choices=["off", "scalar"], default=None,
+                    help="override the template's online interval calibration for "
+                         "this build only. 'off' is the controlled comparison: it "
+                         "changes nothing else, so the leaderboard difference is "
+                         "the calibration's own contribution.")
     ap.add_argument("--skip-score", action="store_true")
     args = ap.parse_args()
 
     print(f"[1/5] building from {args.checkpoint.name} + {args.sigma.name}")
-    zip_path, sub_dir = build(args.checkpoint, args.sigma, args.tag)
+    zip_path, sub_dir = build(args.checkpoint, args.sigma, args.tag,
+                              args.sigma_online)
     print(f"  wrote {zip_path}")
 
     check_imports(sub_dir)
