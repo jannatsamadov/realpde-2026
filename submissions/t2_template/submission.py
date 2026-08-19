@@ -122,6 +122,25 @@ BOUND_SCALE = 0.8
 #              so it stabilises within a few steps, and it is exactly the shape
 #              of the error the leaderboard revealed.
 SIGMA_ONLINE = "scalar"
+
+# Where the interval width comes from before any online rescaling.
+#
+#   "gaussian"  : solve phi(r)/(2Phi(r)-1) = s/SIGMA_GLOBAL for a fitted per-
+#                 element sigma, then multiply by BOUND_SCALE. Two approximations
+#                 stacked: the residuals are not Gaussian, and BOUND_SCALE = 0.8
+#                 is the correction for that, tuned back on validation.
+#   "empirical" : the objective exp(-w/SIGMA_GLOBAL) * P(|e| <= w/2) maximised
+#                 directly over the EMPIRICAL residual distribution, from ~1200
+#                 training residuals per element. No distribution assumed and no
+#                 fudge factor — measured on validation, the best multiplier on
+#                 it is 1.0, which is what dropping the wrong assumption should
+#                 look like. sps 49.63 against the Gaussian route's 48.74.
+#
+# The empirical file stores residual QUANTILES per element, not just the chosen
+# width, because the online rescaling has to re-maximise the objective: if the
+# residuals are a times larger, the optimal width is not a times wider —
+# exp(-w/SIGMA_GLOBAL) has a fixed scale and the coverage term does not.
+SIGMA_SOURCE = "empirical"
 # Pseudo-count shrinking the online estimate toward the prior, so the first
 # window of a trajectory is not calibrated off a single noisy sample.
 SIGMA_PRIOR_COUNT = 4.0
@@ -166,10 +185,11 @@ class AdvectiveTTT:
     """The Track 1 forecaster wrapped in the LTTTA streaming contract."""
 
     def __init__(self, model: torch.nn.Module, device: torch.device,
-                 sigma_file: str):
+                 sigma_file: str, empirical_file: str = ""):
         self.model = model
         self.device = device
         self.sigma_file = sigma_file
+        self.empirical_file = empirical_file
 
         # Normalization bridge, precomputed as tensors so a step is two affine
         # ops rather than any numpy work.
@@ -196,8 +216,13 @@ class AdvectiveTTT:
         self._half_table: Optional[torch.Tensor] = None
         self._alpha_grid: Optional[torch.Tensor] = None
         self._sigma_norm: Optional[torch.Tensor] = None
+        self._quant: Optional[np.ndarray] = None
+        self._levels: Optional[np.ndarray] = None
         if RETURN_BOUNDS:
-            self._half = self._precompute_half_widths()
+            if SIGMA_SOURCE == "empirical":
+                self._half = self._load_empirical()
+            else:
+                self._half = self._precompute_half_widths()
             if SIGMA_ONLINE == "scalar":
                 self._build_alpha_table()
 
@@ -246,6 +271,32 @@ class AdvectiveTTT:
                                         device=self.device)
         return torch.tensor(half_norm, dtype=torch.float32, device=self.device)
 
+    def _load_empirical(self) -> torch.Tensor:
+        """Half-widths read off the empirical residual quantiles, at alpha = 1."""
+        z = np.load(self.empirical_file)
+        self._quant = z["quantiles"].astype(np.float64) * SIGMA_PRIOR_SCALE
+        self._levels = z["levels"].astype(np.float64)
+        # A per-element scale for the online estimator. The level nearest 0.6827
+        # is the empirical stand-in for one standard deviation, which is all the
+        # alpha estimate needs — it is a ratio, so the constant cancels.
+        j = int(np.argmin(np.abs(self._levels - 0.6827)))
+        self._sigma_norm = torch.tensor(self._quant[j][None] / STD_TGT[:2],
+                                        dtype=torch.float32, device=self.device)
+        half_ms = self._empirical_half_at(1.0)
+        return torch.tensor(half_ms / STD_TGT[:2], dtype=torch.float32,
+                            device=self.device)
+
+    def _empirical_half_at(self, alpha: float) -> np.ndarray:
+        """Maximise exp(-2*alpha*q/SIGMA_GLOBAL) * level over the stored levels.
+
+        The empirical CDF is a step function, so the objective only rises at a
+        jump: the maximiser is one of the tabulated quantiles, and this is an
+        exact argmax rather than an interpolation.
+        """
+        q = alpha * self._quant
+        obj = np.exp(-2.0 * q / SIGMA_GLOBAL) * self._levels[:, None, None, None, None]
+        return np.take_along_axis(q, obj.argmax(axis=0)[None], axis=0)[0]
+
     def _build_alpha_table(self) -> None:
         """Half-width maps for a grid of sigma multipliers, solved up front.
 
@@ -259,6 +310,9 @@ class AdvectiveTTT:
         grid = np.geomspace(0.25, 6.0, 48)
         table = np.empty((len(grid),) + sig.shape[1:], dtype=np.float32)
         for i, a in enumerate(grid):
+            if self._quant is not None:
+                table[i] = self._empirical_half_at(float(a)) / STD_TGT[:2]
+                continue
             s_ms = a * sig[0] * STD_TGT[:2]          # back to m/s for the solve
             r = _optimal_half_width_ratio(np.clip(s_ms, 1e-12, None) / SIGMA_GLOBAL)
             table[i] = (0.5 * BOUND_SCALE * 2.0 * s_ms * r) / STD_TGT[:2]
@@ -383,6 +437,7 @@ def get_ttt_model(submission_dir: str, device: str):
     """Entry point, called once before the stream. Not timed."""
     ckpt = os.path.join(submission_dir, "model.pth")
     sigma = os.path.join(submission_dir, "sps_sigma.npz")
+    empirical = os.path.join(submission_dir, "sps_empirical.npz")
 
     dev = torch.device(device if torch.cuda.is_available() or device == "cpu" else "cpu")
     state = torch.load(ckpt, map_location="cpu")
@@ -398,4 +453,4 @@ def get_ttt_model(submission_dir: str, device: str):
     )
     model.load_state_dict(state["model"])
     model.to(dev)
-    return AdvectiveTTT(model, dev, sigma)
+    return AdvectiveTTT(model, dev, sigma, empirical)

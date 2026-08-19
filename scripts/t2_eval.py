@@ -262,17 +262,20 @@ def main() -> None:
         # now is online interval calibration, and specifically whether it repairs
         # a prior that is wrong in the direction the leaderboard revealed.
         base = {"ADAPT_SCOPE": "none", "ADAPT_STEPS": 0}
-        configs.append(("fixed map, scale 0.8",
-                        dict(base, SIGMA_ONLINE="off", BOUND_SCALE=0.8)))
-        # BOUND_SCALE 0.8 was tuned against the FIXED map, where it was partly
-        # compensating for a sigma that did not match the residuals. Once the
-        # width is calibrated online that compensation is double counting, so the
-        # optimum has to be found again rather than carried over.
-        for scale in (0.8, 1.0, 1.2):
-            for count in (2.0, 4.0, 16.0):
-                configs.append((f"online s={scale} n0={count:g}",
-                                dict(base, SIGMA_ONLINE="scalar",
-                                     BOUND_SCALE=scale, SIGMA_PRIOR_COUNT=count)))
+        # Two independent axes, so all four corners are needed to attribute the
+        # gain: where the width comes from (a Gaussian fit versus the empirical
+        # residual distribution) and whether its scale is recalibrated online.
+        for src in ("gaussian", "empirical"):
+            for online in ("off", "scalar"):
+                configs.append((f"{src}, online {online}",
+                                dict(base, SIGMA_SOURCE=src, SIGMA_ONLINE=online)))
+        # And the same four against a prior deliberately mis-scaled the way the
+        # hidden set turned out to be, which is the case that actually decides it.
+        for src in ("gaussian", "empirical"):
+            for online in ("off", "scalar"):
+                configs.append((f"{src}, {online}, 1.49x narrow",
+                                dict(base, SIGMA_SOURCE=src, SIGMA_ONLINE=online,
+                                     SIGMA_PRIOR_SCALE=1.0 / 1.49)))
     else:
         configs.append(("run", {
             "ADAPT_SCOPE": args.adapt_scope,
