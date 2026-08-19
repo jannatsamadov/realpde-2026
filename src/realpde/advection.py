@@ -42,13 +42,28 @@ DT = 0.02            # seconds per frame
 DX_EVAL = 0.003422   # metres per cell at the 32x64 evaluation resolution
 
 
+# The identity grid depends only on the shape, never on the data, but
+# advect_sequence warps 40 times per forward pass and every one of those used to
+# rebuild it. At batch 1 — which is the whole of Track 2 — the advection loop is
+# the forward pass, and these were three extra kernel launches inside each of its
+# 40 iterations. Cached per (shape, device, dtype); the tensors are 2 KB.
+_GRID_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
 def _base_grid(h: int, w: int, device, dtype):
-    yy, xx = torch.meshgrid(
-        torch.arange(h, device=device, dtype=dtype),
-        torch.arange(w, device=device, dtype=dtype),
-        indexing="ij",
-    )
-    return xx, yy
+    key = (h, w, str(device), dtype)
+    hit = _GRID_CACHE.get(key)
+    if hit is None:
+        yy, xx = torch.meshgrid(
+            torch.arange(h, device=device, dtype=dtype),
+            torch.arange(w, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        # Stored with the batch axis already in place so warp does not unsqueeze
+        # on every call either.
+        hit = (xx.unsqueeze(0), yy.unsqueeze(0))
+        _GRID_CACHE[key] = hit
+    return hit
 
 
 def warp(field: torch.Tensor, disp_col: torch.Tensor, disp_row: torch.Tensor) -> torch.Tensor:
@@ -62,9 +77,9 @@ def warp(field: torch.Tensor, disp_col: torch.Tensor, disp_row: torch.Tensor) ->
     source is sampled at the departure point.
     """
     b, c, h, w = field.shape
-    xx, yy = _base_grid(h, w, field.device, field.dtype)
-    src_x = xx.unsqueeze(0) - disp_col
-    src_y = yy.unsqueeze(0) - disp_row
+    xx, yy = _base_grid(h, w, field.device, field.dtype)   # already (1, H, W)
+    src_x = xx - disp_col
+    src_y = yy - disp_row
 
     gx = 2.0 * src_x / max(w - 1, 1) - 1.0
     gy = 2.0 * src_y / max(h - 1, 1) - 1.0
@@ -94,19 +109,26 @@ def advect_sequence(u0: torch.Tensor, v0: torch.Tensor, n_steps: int,
     smearing. `clamp` bounds the per-substep displacement in cells: without it a
     self-advecting field with no pressure term can run away.
     """
-    u, v = u0, v0
+    # The field is carried as one (B, 2, H, W) tensor for the whole loop rather
+    # than as separate u and v. Restacking them on every substep cost 60 extra
+    # kernel launches per forward pass, which is invisible at Track 1's batch of
+    # hundreds and dominant at Track 2's batch of one.
+    uv = torch.stack([u0, v0], dim=1)                      # (B, 2, H, W)
+    # Displacement in cells per substep, both components at once. The row term
+    # is negated because y decreases with row index.
+    k = (DT / DX_EVAL) / substeps
+    kv = torch.tensor([k, -k], device=uv.device, dtype=uv.dtype).view(1, 2, 1, 1)
+
     outs = []
     for _ in range(n_steps):
         for _ in range(substeps):
-            dc, dr = displacement_cells(u, v, steps=1.0 / substeps)
+            d = uv * kv
             if clamp is not None:
-                dc = dc.clamp(-clamp, clamp)
-                dr = dr.clamp(-clamp, clamp)
-            stacked = torch.stack([u, v], dim=1)          # (B, 2, H, W)
-            moved = warp(stacked, dc, dr)
-            u, v = moved[:, 0], moved[:, 1]
-        outs.append(torch.stack([u, v], dim=-1))          # (B, H, W, 2)
-    return torch.stack(outs, dim=1)                        # (B, n, H, W, 2)
+                d = d.clamp(-clamp, clamp)
+            uv = warp(uv, d[:, 0], d[:, 1])
+        outs.append(uv)
+    # (n, B, 2, H, W) -> (B, n, H, W, 2)
+    return torch.stack(outs, dim=1).permute(0, 1, 3, 4, 2)
 
 
 def advect_frozen(field_u: torch.Tensor, field_v: torch.Tensor,

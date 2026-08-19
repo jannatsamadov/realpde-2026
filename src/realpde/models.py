@@ -198,7 +198,16 @@ class AdvectiveUNet(nn.Module):
         adv = advect_sequence(u0, v0, self.t_out, substeps=self.substeps)
         return (adv - self.mean) / self.std
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Everything upstream of the network: (feats, advected estimate).
+
+        None of it depends on a single learnable parameter — the advection is a
+        fixed transport of the input and the derived channels are finite
+        differences of it. Split out so test-time adaptation can cache it: the
+        advection is the expensive part of a forward pass (a 40-step
+        grid_sample loop), and re-running it to compute a gradient on a window
+        already seen would double the per-step cost for nothing.
+        """
         b, _, h, w_, c = x.shape
         adv = self._advected(x)                        # (B, t_out, H, W, C)
 
@@ -215,7 +224,15 @@ class AdvectiveUNet(nn.Module):
             der.permute(0, 3, 1, 2),
             coords.permute(0, 3, 1, 2),
         ], dim=1)
+        return feats, adv
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feats, adv = self.features(x)
+        return self.forward_from_features(feats, adv)
+
+    def forward_from_features(self, feats: torch.Tensor,
+                              adv: torch.Tensor) -> torch.Tensor:
+        """The learnable half, given what `features` produced."""
         e1 = self.enc1(feats)
         e2 = self.enc2(F.avg_pool2d(e1, 2))
         e3 = self.enc3(F.avg_pool2d(e2, 2))
