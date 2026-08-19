@@ -19,6 +19,18 @@ __pycache__/
 # submitted one is kept deliberately, under submissions/.
 checkpoints/*.pt
 checkpoints/*_history.json
+
+# ...except the ones a submission actually rests on. These are 6.8 MB each and
+# exist nowhere else: the archives under submissions/ are ignored too, so
+# without these the best result we have could not be rebuilt or modified.
+# sps_sigma.npz belongs here for the same reason — the interval bounds it feeds
+# are most of the score, and it cannot be recovered without re-running the fit.
+!checkpoints/adv_finetuned_best.pt
+!checkpoints/adv_finetuned_history.json
+!checkpoints/adv_denoise_best.pt
+!checkpoints/adv_denoise_history.json
+!checkpoints/sps_sigma.npz
+!checkpoints/sps_sigma_denoise.npz
 figures/*.gif
 
 # Built submission archives and their unpacked staging directories
