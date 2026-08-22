@@ -108,6 +108,16 @@ def build(checkpoint: Path, sigma: Path, tag: str,
         },
     }, out_dir / "model.pth")
     shutil.copy(sigma, out_dir / "sps_sigma.npz")
+    # Whatever the template's SIGMA_SOURCE is set to has to be in the archive.
+    # Shipping without this file is not a degraded submission, it is a crash on
+    # the first call and a zero on every subscore — which is what the kit's own
+    # evaluator caught here before an upload was spent on it.
+    empirical = ROOT / "checkpoints" / "sps_empirical.npz"
+    if empirical.exists():
+        shutil.copy(empirical, out_dir / "sps_empirical.npz")
+    elif 'SIGMA_SOURCE = "empirical"' in text:
+        raise SystemExit(f"template asks for empirical bounds but {empirical} "
+                         "is missing; run scripts/fit_empirical_bounds.py first")
 
     zip_path = ROOT / "submissions" / f"{tag}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
