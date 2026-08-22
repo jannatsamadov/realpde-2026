@@ -1,0 +1,18 @@
+{
+  "checkpoint": "checkpoints\\adv_regime_best.pt",
+  "zip": "D:\\Projects\\Competitions\\realpde\\submissions\\adv_v5.zip",
+  "extracted_mb": 7.565932273864746,
+  "scores": {
+    "rel_l2_score": 96.23904123182781,
+    "tke_score": 76.41886069905162,
+    "mvpe_score": 96.5033998197674,
+    "time_score": 87.66356213020795,
+    "sps_score": 48.81096755592944,
+    "_rel_l2_error": 0.07815869152545929,
+    "_tke_error": 0.6171549558639526,
+    "_mvpe_error": 0.07246584445238113,
+    "_sps_coverage": 0.8742282636119421,
+    "_measured_channels": 2,
+    "_mean_t_neural_s": 0.01443593846155363
+  }
+}
