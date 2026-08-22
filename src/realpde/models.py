@@ -23,6 +23,8 @@ TIME AS CHANNELS
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -244,12 +246,151 @@ class AdvectiveUNet(nn.Module):
         return adv + unfold_time(self.head(d1), self.t_out, self.channels)
 
 
+# Regime label normalisation. Reynolds number spans 3750 to 27975 — a factor of
+# 7.5 — so it is regressed in log space, where the spacing between the released
+# regimes is roughly uniform. Both targets land in [0, 1].
+RE_LOG_LO, RE_LOG_HI = math.log(3750.0), math.log(27975.0)
+AOA_HI = 20.0
+
+
+def encode_regime(re: torch.Tensor, aoa: torch.Tensor) -> torch.Tensor:
+    """(B,), (B,) -> (B, 2) in [0, 1]."""
+    r = (torch.log(re.clamp_min(1.0)) - RE_LOG_LO) / (RE_LOG_HI - RE_LOG_LO)
+    return torch.stack([r, aoa / AOA_HI], dim=-1)
+
+
+class TemporalRegimeEncoder(nn.Module):
+    """Per-frame embedding, attention over the 20 frames, and a regime code.
+
+    WHY ATTENTION AND NOT RECURRENCE
+
+    The per-step cost of anything sequential is what hurts here: Track 2 is
+    scored at batch size 1, where a 20-step loop is dominated by kernel launches
+    rather than arithmetic — measured on the advection prior, whose 40-step loop
+    was 90% of a forward pass. Attention over 20 tokens is a single batched
+    matmul with no sequential dependency, so it buys temporal structure without
+    paying that cost. Frames are folded into the BATCH for the stem, so even the
+    per-frame encoding runs in parallel.
+
+    WHAT THE REGIME CODE IS FOR
+
+    Reynolds number and angle of attack are never available at scoring time, so
+    they cannot be inputs. But the error is strongly regime-dependent — measured
+    against the PIV noise floor, the model is 2.46x the floor at 0 degrees and
+    3.11x at 20, and worst of all at low Reynolds number with high incidence,
+    which is the separated regime. One set of weights is covering attached and
+    fully separated flow at once.
+
+    So the regime is ESTIMATED from the window instead, and the estimate
+    conditions the forecast. An auxiliary loss on the code makes it actually
+    encode Re and angle of attack rather than whatever else would minimise the
+    forecast loss. Training and inference use the same self-produced code, so
+    there is no teacher-forcing mismatch to leak.
+    """
+
+    def __init__(self, channels: int = 2, d: int = 48, heads: int = 4,
+                 t_in: int = 20):
+        super().__init__()
+        self.d, self.t_in = d, t_in
+        g = min(8, d)
+        self.stem = nn.Sequential(
+            nn.Conv2d(channels, d, 3, stride=2, padding=1),   # 32x64 -> 16x32
+            nn.GroupNorm(g, d), nn.GELU(),
+            nn.Conv2d(d, d, 3, stride=2, padding=1),          # -> 8x16
+            nn.GroupNorm(g, d), nn.GELU(),
+            nn.Conv2d(d, d, 3, stride=2, padding=1),          # -> 4x8
+            nn.GroupNorm(g, d), nn.GELU(),
+        )
+        self.pos = nn.Parameter(torch.zeros(1, t_in, d))
+        self.attn = nn.MultiheadAttention(d, heads, batch_first=True)
+        self.norm = nn.LayerNorm(d)
+        self.regime = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 2))
+
+    def forward(self, x: torch.Tensor):
+        """(B, T, H, W, C) -> (context (B, d, 4, 8), regime (B, 2), code (B, d))."""
+        b, t, h, w, c = x.shape
+        z = x.permute(0, 1, 4, 2, 3).reshape(b * t, c, h, w)
+        z = self.stem(z)                                   # (B*T, d, 4, 8)
+        _, d, hh, ww = z.shape
+        # (B, T, d, P) -> (B*P, T, d): one sequence per bottleneck cell, so the
+        # attention asks "how does this location evolve", not "which frame".
+        z = z.reshape(b, t, d, hh * ww).permute(0, 3, 1, 2).reshape(b * hh * ww, t, d)
+        z = z + self.pos
+        a, _ = self.attn(z, z, z, need_weights=False)
+        z = self.norm(z + a)
+
+        ctx = z.mean(dim=1).reshape(b, hh * ww, d).permute(0, 2, 1).reshape(b, d, hh, ww)
+        code = ctx.mean(dim=(2, 3))                        # (B, d)
+        return ctx, self.regime(code), code
+
+
+class RegimeAttentiveUNet(AdvectiveUNet):
+    """AdvectiveUNet plus temporal attention and self-estimated regime conditioning.
+
+    Everything the base model does is unchanged — the advection prior, the
+    residual on top of it, the zero-initialised head that starts as pure physics.
+    The additions are a temporal-attention context concatenated at the
+    bottleneck, and FiLM modulation of the bottleneck from the regime code.
+
+    `forward` still returns only the prediction, so every existing script,
+    checkpoint loader and submission path keeps working. Training calls
+    `forward_with_regime` to get the auxiliary output as well.
+    """
+
+    def __init__(self, *args, d_time: int = 48, heads: int = 4, **kwargs):
+        super().__init__(*args, **kwargs)
+        w_bott = self.bottleneck.net[0].out_channels
+        self.temporal = TemporalRegimeEncoder(channels=self.channels, d=d_time,
+                                              heads=heads, t_in=self.t_in)
+        self.merge = nn.Conv2d(w_bott + d_time, w_bott, 1)
+        # Zero-initialised FiLM: at step 0 the modulation is the identity, so the
+        # model starts exactly where the base model starts rather than having to
+        # recover from a random perturbation of a working bottleneck.
+        self.film = nn.Linear(d_time, 2 * w_bott)
+        nn.init.zeros_(self.film.weight)
+        nn.init.zeros_(self.film.bias)
+
+    def _trunk(self, feats: torch.Tensor, adv: torch.Tensor, x: torch.Tensor):
+        e1 = self.enc1(feats)
+        e2 = self.enc2(F.avg_pool2d(e1, 2))
+        e3 = self.enc3(F.avg_pool2d(e2, 2))
+        bo = self.bottleneck(F.avg_pool2d(e3, 2))
+
+        ctx, regime, code = self.temporal(x)
+        bo = self.merge(torch.cat([bo, ctx], dim=1))
+        gamma, beta = self.film(code).chunk(2, dim=-1)
+        bo = bo * (1.0 + gamma[..., None, None]) + beta[..., None, None]
+
+        d3 = self.dec3(torch.cat([F.interpolate(bo, scale_factor=2, mode="nearest"), e3], 1))
+        d2 = self.dec2(torch.cat([F.interpolate(d3, scale_factor=2, mode="nearest"), e2], 1))
+        d1 = self.dec1(torch.cat([F.interpolate(d2, scale_factor=2, mode="nearest"), e1], 1))
+        return adv + unfold_time(self.head(d1), self.t_out, self.channels), regime
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feats, adv = self.features(x)
+        return self._trunk(feats, adv, x)[0]
+
+    def forward_with_regime(self, x: torch.Tensor):
+        feats, adv = self.features(x)
+        return self._trunk(feats, adv, x)
+
+    def forward_from_features(self, feats: torch.Tensor, adv: torch.Tensor):
+        raise RuntimeError(
+            "RegimeAttentiveUNet needs the raw window for its temporal branch, so "
+            "the features/trunk split the Track 2 adapter uses does not apply. "
+            "Call forward(x) instead."
+        )
+
+
 def build_model(name: str = "unet", **kwargs) -> nn.Module:
     if name == "unet":
         return UNetForecaster(**kwargs)
     if name == "advective":
         kwargs.pop("residual", None)
         return AdvectiveUNet(**kwargs)
+    if name == "regime":
+        kwargs.pop("residual", None)
+        return RegimeAttentiveUNet(**kwargs)
     raise ValueError(f"unknown model {name!r}")
 
 

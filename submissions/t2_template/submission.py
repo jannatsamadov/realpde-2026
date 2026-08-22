@@ -211,6 +211,18 @@ class AdvectiveTTT:
 
         self._prev_feats: Optional[torch.Tensor] = None
         self._prev_adv: Optional[torch.Tensor] = None
+        # Does this architecture expose the parameter-free half of its forward
+        # pass? The advective U-Net does; one whose trunk reads the raw window
+        # does not, and must be run whole.
+        self._splittable = hasattr(model, "features")
+        if self._splittable:
+            try:
+                with torch.no_grad():
+                    probe = torch.zeros(1, model.t_in, 32, 64, 2, device=device)
+                    f, a = model.features(probe)
+                    model.forward_from_features(f, a)
+            except Exception:
+                self._splittable = False
 
         self._half: Optional[torch.Tensor] = None
         self._half_table: Optional[torch.Tensor] = None
@@ -396,12 +408,18 @@ class AdvectiveTTT:
         self.model.eval()
         xo = self._to_ours(x[..., :2])
         with torch.no_grad():
-            feats, adv = self.model.features(xo)
-            pred_ours = self.model.forward_from_features(feats, adv)
-
-        # (3) Cache this window's parameter-free half for the next adaptation.
-        self._prev_feats = feats.detach()
-        self._prev_adv = adv.detach()
+            if self._splittable:
+                # (3) Cache the parameter-free half so an adaptation step does
+                #     not have to recompute the advection prior.
+                feats, adv = self.model.features(xo)
+                pred_ours = self.model.forward_from_features(feats, adv)
+                self._prev_feats = feats.detach()
+                self._prev_adv = adv.detach()
+            else:
+                # Architectures whose trunk needs the raw window — the temporal
+                # attention branch reads it directly — cannot be split this way.
+                # Adaptation is off by default, so nothing is lost.
+                pred_ours = self.model(xo)
 
         pred = torch.zeros(x.shape[0], T_OUT, x.shape[2], x.shape[3], 3,
                            dtype=torch.float32, device=self.device)

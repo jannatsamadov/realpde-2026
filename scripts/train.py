@@ -42,7 +42,7 @@ from realpde.advection import strain_scaled_noise
 from realpde.data import build_datasets, denormalize
 from realpde.local_score import format_scores, score_arrays
 from realpde.losses import CompositeLoss
-from realpde.models import build_model, count_parameters
+from realpde.models import build_model, count_parameters, encode_regime
 
 ROOT = Path(__file__).resolve().parent.parent
 CKPT_DIR = ROOT / "checkpoints"
@@ -87,7 +87,12 @@ def evaluate(model, val_loader, device, channels: int = 2) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="real", choices=["real", "sim"])
-    ap.add_argument("--model", default="unet", choices=["unet", "advective"],
+    ap.add_argument("--w-regime", type=float, default=0.0,
+                    help="weight on the auxiliary Reynolds/angle-of-attack head. "
+                         "Only the 'regime' architecture has one; the prediction "
+                         "it conditions on is its OWN estimate, so nothing about "
+                         "this leaks into inference, where metadata is empty.")
+    ap.add_argument("--model", default="unet", choices=["unet", "advective", "regime"],
                     help="'advective' adds the semi-Lagrangian prior, derived "
                          "physics channels and coordinates as network inputs")
     ap.add_argument("--epochs", type=int, default=30)
@@ -188,7 +193,20 @@ def run(model, opt, sched, criterion, train_loader, val_loader, device,
                     x = x + strain_scaled_noise(x, args.noise_aug)
 
                 opt.zero_grad(set_to_none=True)
-                loss, parts = criterion(model(x), y)
+                if args.w_regime > 0 and hasattr(model, "forward_with_regime"):
+                    pred, regime = model.forward_with_regime(x)
+                    loss, parts = criterion(pred, y)
+                    # The head is supervised here and its output is discarded at
+                    # inference; what survives is a bottleneck that had to encode
+                    # the regime, which is the point. Re and angle of attack are
+                    # never fed in — metadata is empty on scored calls.
+                    tgt = encode_regime(batch["re"].to(device).float(),
+                                        batch["aoa"].to(device).float())
+                    l_reg = torch.mean((regime - tgt) ** 2)
+                    loss = loss + args.w_regime * l_reg
+                    parts["regime"] = float(l_reg.detach())
+                else:
+                    loss, parts = criterion(model(x), y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
