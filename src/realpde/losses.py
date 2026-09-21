@@ -65,20 +65,78 @@ def mvpe_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return relative_l2(p, t).mean()
 
 
+def sigma_weights(sigma: torch.Tensor, power: float = 1.3,
+                  clip: float = 8.0) -> torch.Tensor:
+    """Per-element weights for the squared error, from a residual sigma map.
+
+    WHY THE SQUARED ERROR SHOULD NOT BE WEIGHTED EQUALLY
+
+    sps_score is 100 * acc * Q, and Q is a per-element mean of exp(-nil) when
+    the target is covered. Measured on the validation split (scripts/q_deficit.py),
+    shrinking the residual by 20% in one region at a time and refitting sigma
+    gives, per unit of squared error removed:
+
+        freestream   6.47        (sigma 0.0034)
+        middle       1.76        (sigma 0.0075)
+        wake         1.00        (sigma 0.0137)
+
+    Accurate cells pay roughly six times what wake cells pay. The reason is in
+    the metric: where sigma is small the band is already tight and nearly all
+    of the loss is coverage, so a little more accuracy flips many elements from
+    zero to almost one. Where sigma is large the optimal band is one that
+    mostly misses, and a 20% improvement does not rescue it.
+
+    Plain MSE does the opposite -- it spends its gradient where the errors are
+    biggest, which is the wake. Weighting by sigma**-power tilts it back;
+    power = 1.3 reproduces the measured ratios (6.08 : 2.19 : 1), and it is
+    measured rather than chosen. power = 0 is plain MSE and power = 2 fully
+    standardises the residual, which overshoots.
+
+    Weights are normalised to mean one so the loss keeps its scale, and clipped
+    because the map's smallest entries are 1e-4 -- a few masked or near-static
+    cells would otherwise take over the gradient.
+    """
+    w = (sigma.clamp_min(1e-5) / sigma.mean()) ** (-power)
+    w = w.clamp(max=clip)
+    return w / w.mean()
+
+
 class CompositeLoss(torch.nn.Module):
     """w_mse * MSE + w_tke * TKE-relative-L2 + w_mvpe * MVPE-relative-L2.
 
     Weights are deliberately explicit rather than tuned in advance: the MSE and
     TKE terms pull against each other (sharpening a prediction raises its MSE),
     and where the balance sits is an empirical question for the first sweep.
+
+    `weight_map`, if given, replaces the plain MSE with a per-element weighted
+    one -- see sigma_weights for what it is and why.
     """
 
-    def __init__(self, w_mse: float = 1.0, w_tke: float = 0.0, w_mvpe: float = 0.0):
+    def __init__(self, w_mse: float = 1.0, w_tke: float = 0.0, w_mvpe: float = 0.0,
+                 weight_map: torch.Tensor | None = None):
         super().__init__()
         self.w_mse, self.w_tke, self.w_mvpe = w_mse, w_tke, w_mvpe
+        if weight_map is None:
+            self.weight_map = None
+        else:
+            self.register_buffer("weight_map", weight_map)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        mse = F.mse_loss(pred, target)
+        if self.weight_map is None:
+            mse = F.mse_loss(pred, target)
+        else:
+            # Masked cells read exactly zero in both components and are not
+            # scored. They also sit at the bottom of the sigma map -- 2.7% of
+            # the grid at sigma 0.0009 against 0.0083 elsewhere -- so weighting
+            # by sigma**-power would hand them the largest weight in the loss,
+            # which is precisely backwards. They cannot be excluded from a fixed
+            # map either, because which cells are masked moves with the angle of
+            # attack. So they are found per sample, from the target, and held at
+            # weight one: the model still learns to output zero there, but no
+            # gradient is spent making it more zero.
+            valid = (target != 0).any(dim=-1, keepdim=True)
+            w = torch.where(valid, self.weight_map, torch.ones_like(self.weight_map))
+            mse = (w * (pred - target) ** 2).mean() / w.mean()
         parts = {"mse": mse.detach()}
         total = self.w_mse * mse
 

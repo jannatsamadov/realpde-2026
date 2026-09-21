@@ -42,7 +42,7 @@ from realpde.advection import strain_scaled_noise
 from realpde.data import (DEFAULT_VAL_RE, EXTRAPOLATION_VAL_RE, build_datasets,
                           denormalize)
 from realpde.local_score import format_scores, score_arrays
-from realpde.losses import CompositeLoss
+from realpde.losses import CompositeLoss, sigma_weights
 from realpde.models import build_model, count_parameters, encode_regime
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +109,14 @@ def main() -> None:
     ap.add_argument("--w-mse", type=float, default=1.0)
     ap.add_argument("--w-tke", type=float, default=0.0)
     ap.add_argument("--w-mvpe", type=float, default=0.0)
+    ap.add_argument("--sigma-power", type=float, default=0.0,
+                    help="tilt the squared error toward accurate cells by "
+                         "weighting it with sigma**-power, sigma being the "
+                         "residual map in checkpoints/sigma_map_train.npz. "
+                         "Measured: a unit of error removed from the freestream "
+                         "is worth 6.5x one removed from the wake, because the "
+                         "metric's loss there is coverage rather than width. "
+                         "0 disables it (plain MSE); 1.3 matches the measurement.")
     ap.add_argument("--train-stride", type=int, default=10)
     ap.add_argument("--val-re", type=str, default=None,
                     help="comma-separated Reynolds numbers to hold out, e.g. "
@@ -170,7 +178,15 @@ def main() -> None:
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
-    criterion = CompositeLoss(args.w_mse, args.w_tke, args.w_mvpe)
+    weight_map = None
+    if args.sigma_power > 0:
+        sig = np.load(ROOT / "checkpoints" / "sigma_map_train.npz")["sigma"]
+        weight_map = sigma_weights(torch.from_numpy(sig).to(device),
+                                   power=args.sigma_power)
+        print(f"loss   sigma-weighted, power {args.sigma_power}, "
+              f"weights {weight_map.min():.3f}..{weight_map.max():.3f}")
+    criterion = CompositeLoss(args.w_mse, args.w_tke, args.w_mvpe,
+                              weight_map=weight_map).to(device)
 
     print(f"\ndevice {device}   {gpu_line()}")
     print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
