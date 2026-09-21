@@ -131,6 +131,35 @@ def advect_sequence(u0: torch.Tensor, v0: torch.Tensor, n_steps: int,
     return torch.stack(outs, dim=1).permute(0, 1, 3, 4, 2)
 
 
+def advect_one_step(field: torch.Tensor, substeps: int = 1,
+                    clamp: float | None = 3.0) -> torch.Tensor:
+    """Advance every frame of a window by exactly one frame interval, in parallel.
+
+    field  : (B, T, H, W, 2) physical velocities
+    returns: the same shape, each frame self-advected one step forward
+
+    advect_sequence walks n_steps forward from one frame and is therefore
+    sequential: n_steps rounds of grid_sample that cannot overlap. Here the T
+    frames are independent -- each is advanced one step on its own -- so T folds
+    into the batch and the whole horizon costs one grid_sample per substep.
+
+    That is what makes a refinement pass affordable. At Track 2's batch size of
+    one the sequential loop is launch-bound rather than arithmetic-bound, so a
+    second sequential prior would roughly double the forward pass, while this
+    one adds a single batched call.
+    """
+    b, t, h, w, c = field.shape
+    uv = field.permute(0, 1, 4, 2, 3).reshape(b * t, c, h, w)
+    k = (DT / DX_EVAL) / substeps
+    kv = torch.tensor([k, -k], device=uv.device, dtype=uv.dtype).view(1, 2, 1, 1)
+    for _ in range(substeps):
+        d = uv * kv
+        if clamp is not None:
+            d = d.clamp(-clamp, clamp)
+        uv = warp(uv, d[:, 0], d[:, 1])
+    return uv.reshape(b, t, c, h, w).permute(0, 1, 3, 4, 2)
+
+
 def advect_frozen(field_u: torch.Tensor, field_v: torch.Tensor,
                   trans_u: torch.Tensor, trans_v: torch.Tensor,
                   n_steps: int, valid: torch.Tensor | None = None):

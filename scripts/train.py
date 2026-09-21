@@ -39,7 +39,8 @@ from torch.utils.data import DataLoader
 from gpu_guard import Governor, gpu_status
 from gpu_lock import GpuLock
 from realpde.advection import strain_scaled_noise
-from realpde.data import build_datasets, denormalize
+from realpde.data import (DEFAULT_VAL_RE, EXTRAPOLATION_VAL_RE, build_datasets,
+                          denormalize)
 from realpde.local_score import format_scores, score_arrays
 from realpde.losses import CompositeLoss
 from realpde.models import build_model, count_parameters, encode_regime
@@ -92,9 +93,15 @@ def main() -> None:
                          "Only the 'regime' architecture has one; the prediction "
                          "it conditions on is its OWN estimate, so nothing about "
                          "this leaks into inference, where metadata is empty.")
-    ap.add_argument("--model", default="unet", choices=["unet", "advective", "regime"],
+    ap.add_argument("--model", default="unet",
+                    choices=["unet", "advective", "regime", "scaleinv",
+                             "solverloop"],
                     help="'advective' adds the semi-Lagrangian prior, derived "
-                         "physics channels and coordinates as network inputs")
+                         "physics channels and coordinates as network inputs; "
+                         "'scaleinv' additionally divides each window by its own "
+                         "velocity scale and conditions on it, so the network "
+                         "never sees a magnitude and an unseen Reynolds number "
+                         "becomes an interpolation")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -103,6 +110,13 @@ def main() -> None:
     ap.add_argument("--w-tke", type=float, default=0.0)
     ap.add_argument("--w-mvpe", type=float, default=0.0)
     ap.add_argument("--train-stride", type=int, default=10)
+    ap.add_argument("--val-re", type=str, default=None,
+                    help="comma-separated Reynolds numbers to hold out, e.g. "
+                         "'3750,5025,25425,26700'. The default holds out three "
+                         "INTERIOR values, which measures interpolation; holding "
+                         "out the extremes measures extrapolation, which is what "
+                         "the private test actually asks for. Use 'extrap' for "
+                         "the four extreme regimes.")
     ap.add_argument("--noise-aug", type=float, default=0.0,
                     help="strain-scaled noise added to the INPUT during training, "
                          "as a fraction of the input's fluctuation sd. Teaches the "
@@ -126,7 +140,18 @@ def main() -> None:
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_ds, val_ds = build_datasets(args.split, train_stride=args.train_stride)
+    # The private test uses unseen regimes. Whether "unseen" means between the
+    # trained values or outside them changes the question entirely, and our
+    # default split only ever asked the easier one.
+    if args.val_re is None:
+        val_re = DEFAULT_VAL_RE
+    elif args.val_re == "extrap":
+        val_re = EXTRAPOLATION_VAL_RE
+    else:
+        val_re = tuple(int(v) for v in args.val_re.split(","))
+
+    train_ds, val_ds = build_datasets(args.split, val_re=val_re,
+                                      train_stride=args.train_stride)
     # The simulation split carries pressure as a third channel; only u and v are
     # ever scored, so both splits are trained on the same two.
     use_channels = 2
@@ -150,6 +175,8 @@ def main() -> None:
     print(f"\ndevice {device}   {gpu_line()}")
     print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
     print(f"data   {args.split}: {len(train_ds)} train / {len(val_ds)} val windows")
+    print(f"val Re {val_re}  "
+          f"({'EXTRAPOLATION' if min(val_re) < 6300 or max(val_re) > 24150 else 'interpolation'})")
     print(f"loss   mse={args.w_mse} tke={args.w_tke} mvpe={args.w_mvpe}")
     print(f"gpu duty target {args.gpu_duty:.0%}, pause above {args.max_temp:.0f}C "
           f"(fan is dead — deliberate throttle)\n")

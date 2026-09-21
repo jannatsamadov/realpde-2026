@@ -68,6 +68,16 @@ U_PER_RE = 1.394e-5
 # validation measures interpolation to Re values never trained on.
 DEFAULT_VAL_RE = (6300, 13950, 22875)
 
+# The same idea taken literally. DEFAULT_VAL_RE holds out three values from the
+# middle of the trained range, so a model only ever has to interpolate to reach
+# them, and every score measured on it inherits that. The private test says
+# "unseen parameter regimes" without promising they lie inside ours, and the
+# quantity that matters -- the velocity magnitude -- is proportional to Re, so a
+# value outside the range is an extrapolation in the input distribution itself.
+# Holding out both ends measures that. Training then spans 6300..24150 and
+# validation sits below and above it on both sides.
+EXTRAPOLATION_VAL_RE = (3750, 5025, 25425, 26700)
+
 
 # Cache arrays per split so repeated WindowDataset construction (train + val)
 # does not read the same gigabyte twice.
