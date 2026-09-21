@@ -34,6 +34,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TRAIN = ROOT / "scripts" / "train.py"
 CKPT = ROOT / "checkpoints"
+# While this file exists no new stage starts; a stage already running finishes.
+# It is checked by each new process, so it can pause a queue of commands that
+# was launched earlier -- create it to hold, delete it and relaunch to go on.
+HOLD = CKPT / "HOLD_QUEUE"
 
 sys.path.insert(0, str(ROOT / "src"))
 from realpde.models import STANDARD_ARCH  # noqa: E402
@@ -43,6 +47,11 @@ def run_stage(args_list: list[str], tag: str) -> None:
     if (CKPT / f"{tag}_history.json").exists():
         print(f"[standard] {tag}: already complete, skipping")
         return
+    if HOLD.exists():
+        # Exit cleanly rather than skip: a held sim stage must not let the real
+        # stage start from a checkpoint that does not exist yet.
+        print(f"[standard] {tag}: queue on hold ({HOLD}), not started", flush=True)
+        raise SystemExit(0)
     cmd = [sys.executable, str(TRAIN), *args_list, "--tag", tag, "--wait-for-gpu"]
     print(f"[standard] {tag}: {' '.join(args_list)}", flush=True)
     rc = subprocess.call(cmd)
