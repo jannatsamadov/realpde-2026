@@ -31,6 +31,13 @@ checkpoints/*_history.json
 !checkpoints/adv_denoise_history.json
 !checkpoints/sps_sigma.npz
 !checkpoints/sps_sigma_denoise.npz
+# Track 1 best since 2026-09-21 (t1_solverloop, 78.858), and the model the
+# standard recipe is measured against on the extrapolation split.
+!checkpoints/sl_default_best.pt
+!checkpoints/sl_default_history.json
+!checkpoints/sps_sigma_sl_default.npz
+!checkpoints/xf_scaleinv_best.pt
+!checkpoints/xf_scaleinv_history.json
 figures/*.gif
 
 # Built submission archives and their unpacked staging directories
