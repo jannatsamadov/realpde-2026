@@ -140,7 +140,11 @@ SIGMA_ONLINE = "scalar"
 # width, because the online rescaling has to re-maximise the objective: if the
 # residuals are a times larger, the optimal width is not a times wider —
 # exp(-w/SIGMA_GLOBAL) has a fixed scale and the coverage term does not.
-SIGMA_SOURCE = "empirical"
+#
+# LEADERBOARD VERDICT: "empirical" won locally (+0.695 sps) and LOST on the
+# leaderboard (t2_v2: -0.281 sps against t2_v1). t2_v1, our best Track 2 score,
+# is the "gaussian" route. The default is what won there, not what won here.
+SIGMA_SOURCE = "gaussian"
 # Pseudo-count shrinking the online estimate toward the prior, so the first
 # window of a trajectory is not calibrated off a single noisy sample.
 SIGMA_PRIOR_COUNT = 4.0

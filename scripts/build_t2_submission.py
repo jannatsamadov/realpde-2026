@@ -112,12 +112,15 @@ def build(checkpoint: Path, sigma: Path, tag: str,
     # Shipping without this file is not a degraded submission, it is a crash on
     # the first call and a zero on every subscore — which is what the kit's own
     # evaluator caught here before an upload was spent on it.
+    # Only when asked for: the file on disk was fitted to one particular model's
+    # residuals, so shipping it beside a different model is 13.5 MB of the wrong
+    # widths waiting for someone to flip the switch.
     empirical = ROOT / "checkpoints" / "sps_empirical.npz"
-    if empirical.exists():
+    if 'SIGMA_SOURCE = "empirical"' in text:
+        if not empirical.exists():
+            raise SystemExit(f"template asks for empirical bounds but {empirical} "
+                             "is missing; run scripts/fit_empirical_bounds.py first")
         shutil.copy(empirical, out_dir / "sps_empirical.npz")
-    elif 'SIGMA_SOURCE = "empirical"' in text:
-        raise SystemExit(f"template asks for empirical bounds but {empirical} "
-                         "is missing; run scripts/fit_empirical_bounds.py first")
 
     zip_path = ROOT / "submissions" / f"{tag}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
