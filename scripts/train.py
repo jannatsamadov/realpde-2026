@@ -43,7 +43,10 @@ from realpde.data import (DEFAULT_VAL_RE, EXTRAPOLATION_VAL_RE, build_datasets,
                           denormalize)
 from realpde.local_score import format_scores, score_arrays
 from realpde.losses import CompositeLoss, sigma_weights
-from realpde.models import build_model, count_parameters, encode_regime
+from realpde.models import (_ARCHS, STANDARD_ARCH, build_model,
+                            count_parameters, encode_regime)
+
+ARCH_NAMES = list(_ARCHS)
 
 ROOT = Path(__file__).resolve().parent.parent
 CKPT_DIR = ROOT / "checkpoints"
@@ -93,15 +96,14 @@ def main() -> None:
                          "Only the 'regime' architecture has one; the prediction "
                          "it conditions on is its OWN estimate, so nothing about "
                          "this leaks into inference, where metadata is empty.")
-    ap.add_argument("--model", default="unet",
-                    choices=["unet", "advective", "regime", "scaleinv",
-                             "solverloop"],
-                    help="'advective' adds the semi-Lagrangian prior, derived "
-                         "physics channels and coordinates as network inputs; "
-                         "'scaleinv' additionally divides each window by its own "
-                         "velocity scale and conditions on it, so the network "
-                         "never sees a magnitude and an unseen Reynolds number "
-                         "becomes an interpolation")
+    ap.add_argument("--model", default=STANDARD_ARCH,
+                    choices=["unet", *ARCH_NAMES],
+                    help=f"defaults to the standard, '{STANDARD_ARCH}': advection "
+                         "prior, derived physics channels (speed, vorticity, "
+                         "divergence), coordinates and scale conditioning. "
+                         "'_loop' variants add one solver-in-the-loop pass. "
+                         "Use scripts/train_standard.py for the full recipe, "
+                         "which also does the sim pretraining.")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)

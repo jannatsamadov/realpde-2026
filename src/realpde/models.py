@@ -156,10 +156,15 @@ class AdvectiveUNet(nn.Module):
         substeps: int = 2,
         mean=(0.1550, -0.0005),
         std=(0.0968, 0.0160),
+        refine: int = 0,
     ):
         super().__init__()
         self.t_in, self.t_out, self.channels = t_in, t_out, channels
         self.substeps = substeps
+        # Solver-in-the-loop passes; see _prior_from_forecast. Fixed by the
+        # architecture NAME in build_model, never by a flag, because the
+        # submission templates rebuild a model from its name alone.
+        self.refine = refine
         self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
         self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
 
@@ -236,11 +241,66 @@ class AdvectiveUNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feats, adv = self.features(x)
-        return self.forward_from_features(feats, adv)
+        pred = self._single_pass(feats, adv)
+        for _ in range(self.refine):
+            adv = self._prior_from_forecast(x, pred)
+            feats = self._repack(x, adv, feats)
+            pred = self._single_pass(feats, adv)
+        return pred
 
     def forward_from_features(self, feats: torch.Tensor,
                               adv: torch.Tensor) -> torch.Tensor:
-        """The learnable half, given what `features` produced."""
+        """The learnable half, given what `features` produced.
+
+        Only defined when it equals `forward`. With refinement it does not: the
+        second pass rebuilds its prior from the raw window, which `features`
+        does not carry. Returning the first pass here would be silently wrong --
+        the Track 2 adapter decides whether a model is splittable by whether
+        this call succeeds, and would then run a function the model was never
+        trained as. Raising sends it down the whole-forward path instead.
+        """
+        if self.refine:
+            raise RuntimeError(
+                f"{type(self).__name__} with refine={self.refine} rebuilds its "
+                "prior from the raw window; call forward(x), not the split."
+            )
+        return self._single_pass(feats, adv)
+
+    def _repack(self, x: torch.Tensor, adv: torch.Tensor,
+                feats: torch.Tensor) -> torch.Tensor:
+        """Input channels for a refinement pass: same window, new prior."""
+        return self._pack(x, adv)
+
+    def _prior_from_forecast(self, x: torch.Tensor,
+                             pred: torch.Tensor) -> torch.Tensor:
+        """Solver in the loop: frame k's prior = corrected frame k-1, one step on.
+
+        The first-pass prior advects the last input frame twenty steps with no
+        pressure term and no viscosity, and nothing corrects it on the way, so
+        by frame twenty its error has compounded the whole distance -- which is
+        where ours is: 1.3x the measurement noise floor at lead 1, 3.6x at 20.
+        Here the transport restarts every frame from a field the network has
+        already corrected. Frame 0 has no predecessor among the outputs and uses
+        the last input frame, exactly as the first-pass prior does.
+
+        The twenty one-step advections are independent, so they run as one
+        batched call (advect_one_step), not a sequential loop: about 1.07x the
+        forward cost at batch one.
+
+        With a zero-initialised head this is exactly the identity --
+        one_step(adv[k-1]) is adv[k] -- so a refining model starts bit-identical
+        to its non-refining twin.
+
+        Measured on the advective model, full recipe, extrapolation split:
+        rel_l2 +0.10, sps +0.35, time_score -0.73, net about -0.02 final.
+        """
+        prev = torch.cat([x[:, -1:], pred[:, :-1]], dim=1)   # (B, t_out, H, W, C)
+        phys = prev * self.std + self.mean
+        adv = advect_one_step(phys, substeps=self.substeps)
+        return (adv - self.mean) / self.std
+
+    def _single_pass(self, feats: torch.Tensor, adv: torch.Tensor) -> torch.Tensor:
+        """One application of the U-Net: the prior plus a learned residual."""
         e1 = self.enc1(feats)
         e2 = self.enc2(F.avg_pool2d(e1, 2))
         e3 = self.enc3(F.avg_pool2d(e2, 2))
@@ -509,14 +569,24 @@ class ScaleInvariantUNet(AdvectiveUNet):
         return (phys - self.mean) / self.std
 
     def features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        b, _, h, w_, c = x.shape
         phys = x * self.std + self.mean
         r = window_scale(phys) / U_REF                    # (B,)
-
         # The advection prior is transport at the true velocity and is already
         # correct at any scale; it is the *output* baseline and stays physical.
         adv = self._advected(x)
-        # What the network looks at is the same flow rescaled to the reference.
+        return self._pack_scaled(x, adv, r), adv
+
+    def _repack(self, x: torch.Tensor, adv: torch.Tensor,
+                feats: torch.Tensor) -> torch.Tensor:
+        # The window -- and so its scale -- is the same on every pass; reuse the
+        # scale the first pass measured rather than re-estimating it.
+        r = torch.exp(feats[:, self.LOG_R_CHANNEL, 0, 0])
+        return self._pack_scaled(x, adv, r)
+
+    def _pack_scaled(self, x: torch.Tensor, adv: torch.Tensor,
+                     r: torch.Tensor) -> torch.Tensor:
+        """Input channels, with window and prior rescaled to the reference."""
+        b, _, h, w_, c = x.shape
         x_sn = self._rescale_norm(x, r)
         adv_sn = self._rescale_norm(adv, r)
 
@@ -526,17 +596,15 @@ class ScaleInvariantUNet(AdvectiveUNet):
         coords = coordinate_channels(b, h, w_, x.device, x.dtype)
 
         log_r = torch.log(r).view(-1, 1, 1, 1).expand(b, 1, h, w_)
-        feats = torch.cat([
+        return torch.cat([
             fold_time(x_sn),
             fold_time(adv_sn),
             der.permute(0, 3, 1, 2),
             coords.permute(0, 3, 1, 2),
             log_r.to(x.dtype),
         ], dim=1)
-        return feats, adv
 
-    def forward_from_features(self, feats: torch.Tensor,
-                              adv: torch.Tensor) -> torch.Tensor:
+    def _single_pass(self, feats: torch.Tensor, adv: torch.Tensor) -> torch.Tensor:
         # The plane is constant over the grid, so any cell recovers it exactly.
         log_r = feats[:, self.LOG_R_CHANNEL, 0, 0]
         r = torch.exp(log_r)
@@ -561,78 +629,35 @@ class ScaleInvariantUNet(AdvectiveUNet):
         return adv + res * r.view(-1, 1, 1, 1, 1)
 
 
-class SolverLoopUNet(AdvectiveUNet):
-    """AdvectiveUNet whose transport prior is recomputed from its own forecast.
-
-    THE PROBLEM WITH A PRIOR COMPUTED ONCE
-        The base model advects the last input frame twenty steps forward and
-        hands the network all twenty at once. Nothing corrects the transport
-        along the way: by frame twenty the prior is the result of twenty
-        unassisted advection steps, with no pressure term and no viscosity, and
-        its error has compounded the whole way. That matches where our error
-        actually is -- 1.3x the measurement noise floor at lead 1 and 3.6x at
-        lead 20, so essentially all of the remaining room is at long range.
-
-    WHAT CHANGES
-        One refinement pass. After the first forecast, frame k's prior is
-        rebuilt as the *predicted* frame k-1 advanced a single step, so the
-        transport starts from a field the network has already corrected instead
-        of from a twenty-step extrapolation. The same U-Net is then applied
-        again to that better prior. Weights are shared, so parameter count is
-        unchanged and the comparison against the base model is clean.
-
-    WHY IT IS AFFORDABLE
-        The twenty single-step advections are independent of each other, so they
-        run as one batched call rather than a sequential loop -- see
-        advect_one_step. The added cost is close to one extra U-Net pass, not a
-        second advection prior, which matters because the sequential prior is
-        about 90% of a forward pass at Track 2's batch size of one.
-
-    NOT COMBINED WITH SCALE CONDITIONING YET, on purpose: one change at a time,
-    or a gain cannot be attributed.
-    """
-
-    def __init__(self, *args, refine: int = 1, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.refine = refine
-
-    def _prior_from_forecast(self, x: torch.Tensor,
-                             pred: torch.Tensor) -> torch.Tensor:
-        """Frame k's prior = corrected frame k-1, advanced one step.
-
-        Frame 0 has no predecessor among the outputs, so it uses the last input
-        frame -- which is exactly what the base prior does for its first step.
-        """
-        prev = torch.cat([x[:, -1:], pred[:, :-1]], dim=1)   # (B, t_out, H, W, C)
-        phys = prev * self.std + self.mean
-        adv = advect_one_step(phys, substeps=self.substeps)
-        return (adv - self.mean) / self.std
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feats, adv = self.features(x)
-        pred = self.forward_from_features(feats, adv)
-        for _ in range(self.refine):
-            adv = self._prior_from_forecast(x, pred)
-            pred = self.forward_from_features(self._pack(x, adv), adv)
-        return pred
+# Architecture name -> (class, refinement passes). The pass count lives here and
+# nowhere else: the submission templates rebuild a model from its name, so a
+# refinement set by a training flag would silently vanish at inference.
+#
+# THE STANDARD is "scaleinv": advection prior + derived physics channels
+# (speed, vorticity, divergence) + coordinates + scale conditioning, trained
+# with sim pretraining (scripts/train_standard.py). Every new idea is measured
+# ON TOP of it -- a confirmed improvement becomes the baseline, it is not kept
+# aside for tidiness.
+_ARCHS = {
+    "advective": (AdvectiveUNet, 0),
+    "solverloop": (AdvectiveUNet, 1),
+    "regime": (RegimeAttentiveUNet, 0),
+    "scaleinv": (ScaleInvariantUNet, 0),
+    "scaleinv_loop": (ScaleInvariantUNet, 1),
+}
+STANDARD_ARCH = "scaleinv"
 
 
 def build_model(name: str = "unet", **kwargs) -> nn.Module:
     if name == "unet":
         return UNetForecaster(**kwargs)
-    if name == "advective":
-        kwargs.pop("residual", None)
-        return AdvectiveUNet(**kwargs)
-    if name == "regime":
-        kwargs.pop("residual", None)
-        return RegimeAttentiveUNet(**kwargs)
-    if name == "scaleinv":
-        kwargs.pop("residual", None)
-        return ScaleInvariantUNet(**kwargs)
-    if name == "solverloop":
-        kwargs.pop("residual", None)
-        return SolverLoopUNet(**kwargs)
-    raise ValueError(f"unknown model {name!r}")
+    if name not in _ARCHS:
+        raise ValueError(f"unknown model {name!r}")
+    cls, refine = _ARCHS[name]
+    kwargs.pop("residual", None)
+    if refine:
+        kwargs["refine"] = refine
+    return cls(**kwargs)
 
 
 def count_parameters(model: nn.Module) -> tuple[int, float]:
