@@ -190,8 +190,15 @@ def _bounds(pred: np.ndarray):
     channel) and the width that maximises coverage * exp(-width/SIGMA_GLOBAL).
     Measured on validation: 48.74 against 22.96 for the default.
     """
+    # The half-width depends on sigma alone, and sigma is one (1, T, H, W, 2)
+    # map shared by every window. Solving it on the map and letting numpy
+    # broadcast gives the same numbers for 1/N of the work: broadcasting first
+    # ran the interpolation over N x 20 x 32 x 64 x 2 points -- 22 million on our
+    # validation split -- in float64, which was seconds, while the forward pass
+    # it was attached to takes 0.13 s. time_score is per sample, so that came
+    # straight off the score.
     sigma = _load_sigma()[..., :2] * SIGMA_INFLATE
-    s = np.clip(np.broadcast_to(sigma, pred[..., :2].shape), 1e-12, None)
+    s = np.clip(sigma, 1e-12, None)
     r = _optimal_half_width_ratio(s / SIGMA_GLOBAL)
     half = (0.5 * BOUND_SCALE * 2.0 * s * r).astype(np.float32)
 
