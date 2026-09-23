@@ -120,6 +120,11 @@ def main() -> None:
                          "metric's loss there is coverage rather than width. "
                          "0 disables it (plain MSE); 1.3 matches the measurement.")
     ap.add_argument("--train-stride", type=int, default=10)
+    ap.add_argument("--val-aoa", type=str, default=None,
+                    help="comma-separated angles of attack to hold out, e.g. '10'. "
+                         "Every split before 2026-09-23 kept all five angles in "
+                         "training, so nothing measured whether reaching an unseen "
+                         "angle costs anything. Combines with --val-re.")
     ap.add_argument("--val-re", type=str, default=None,
                     help="comma-separated Reynolds numbers to hold out, e.g. "
                          "'3750,5025,25425,26700'. The default holds out three "
@@ -160,8 +165,13 @@ def main() -> None:
     else:
         val_re = tuple(int(v) for v in args.val_re.split(","))
 
+    val_aoa = () if args.val_aoa is None else tuple(
+        int(v) for v in args.val_aoa.split(","))
+    if val_aoa:
+        val_re = ()          # hold out the angle alone, so the axes do not mix
     train_ds, val_ds = build_datasets(args.split, val_re=val_re,
-                                      train_stride=args.train_stride)
+                                      train_stride=args.train_stride,
+                                      val_aoa=val_aoa)
     # The simulation split carries pressure as a third channel; only u and v are
     # ever scored, so both splits are trained on the same two.
     use_channels = 2
@@ -193,8 +203,12 @@ def main() -> None:
     print(f"\ndevice {device}   {gpu_line()}")
     print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
     print(f"data   {args.split}: {len(train_ds)} train / {len(val_ds)} val windows")
-    print(f"val Re {val_re}  "
-          f"({'EXTRAPOLATION' if min(val_re) < 6300 or max(val_re) > 24150 else 'interpolation'})")
+    if val_aoa:
+        print(f"val AoA {val_aoa} — every Reynolds number is in training, "
+              f"only the angle is unseen")
+    else:
+        print(f"val Re {val_re}  "
+              f"({'EXTRAPOLATION' if min(val_re) < 6300 or max(val_re) > 24150 else 'interpolation'})")
     print(f"loss   mse={args.w_mse} tke={args.w_tke} mvpe={args.w_mvpe}")
     print(f"gpu duty target {args.gpu_duty:.0%}, pause above {args.max_temp:.0f}C "
           f"(fan is dead — deliberate throttle)\n")

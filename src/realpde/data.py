@@ -201,12 +201,22 @@ class WindowDataset(Dataset):
         }
 
 
-def split_cases(split: str = "real", val_re: tuple[int, ...] = DEFAULT_VAL_RE):
-    """Partition trajectories by Reynolds number, so no Re appears in both sides."""
+def split_cases(split: str = "real", val_re: tuple[int, ...] = DEFAULT_VAL_RE,
+                val_aoa: tuple[int, ...] = ()):
+    """Partition trajectories so no held-out regime appears on both sides.
+
+    `val_re` holds out whole Reynolds numbers. `val_aoa` holds out whole angles
+    of attack, which nothing did until 2026-09-23: every split we had measured
+    generalisation across Re while every angle in the data was also in training.
+    The dataset has only five angles (0, 5, 10, 15, 20), so a model has never had
+    to reach one it did not see, and we could not tell whether that costs
+    anything. Holding one out is how that question gets an answer.
+    """
     _, meta = load_split(split)
     train, val = [], []
     for t in meta["trajectories"]:
-        (val if t["re_nominal"] in val_re else train).append(t["case"])
+        held = t["re_nominal"] in val_re or t.get("aoa_nominal") in val_aoa
+        (val if held else train).append(t["case"])
     return train, val
 
 
@@ -215,9 +225,10 @@ def build_datasets(
     val_re: tuple[int, ...] = DEFAULT_VAL_RE,
     train_stride: int = 10,
     val_stride: int = T_IN + T_OUT,   # 40: fully disjoint windows, no cross-window leak
+    val_aoa: tuple[int, ...] = (),
     **kwargs,
 ):
-    train_cases, val_cases = split_cases(split, val_re)
+    train_cases, val_cases = split_cases(split, val_re, val_aoa)
     train = WindowDataset(split, cases=train_cases, stride=train_stride, **kwargs)
     val = WindowDataset(split, cases=val_cases, stride=val_stride, **kwargs)
     return train, val
