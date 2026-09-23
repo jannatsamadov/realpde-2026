@@ -50,6 +50,26 @@ DX_EVAL = 0.003422   # metres per cell at the 32x64 evaluation resolution
 _GRID_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
 
 
+# Same reasoning for the per-substep displacement constant, plus one more: it was
+# built with torch.tensor([...], device=cuda), which is a host-to-device copy. A
+# CUDA graph cannot capture one of those, so caching it is what makes the whole
+# forward pass capturable -- and capture is the only way to get the per-step cost
+# down at Track 2's batch of one, where the platform measured us 1.8x slower than
+# the single-pass model for what is only 15% more arithmetic.
+_KV_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _kv(k: float, device, dtype) -> torch.Tensor:
+    """(1, 2, 1, 1) tensor [k, -k]; the row term is negated because y decreases
+    with row index."""
+    key = (k, str(device), dtype)
+    hit = _KV_CACHE.get(key)
+    if hit is None:
+        hit = torch.tensor([k, -k], device=device, dtype=dtype).view(1, 2, 1, 1)
+        _KV_CACHE[key] = hit
+    return hit
+
+
 def _base_grid(h: int, w: int, device, dtype):
     key = (h, w, str(device), dtype)
     hit = _GRID_CACHE.get(key)
@@ -116,8 +136,7 @@ def advect_sequence(u0: torch.Tensor, v0: torch.Tensor, n_steps: int,
     uv = torch.stack([u0, v0], dim=1)                      # (B, 2, H, W)
     # Displacement in cells per substep, both components at once. The row term
     # is negated because y decreases with row index.
-    k = (DT / DX_EVAL) / substeps
-    kv = torch.tensor([k, -k], device=uv.device, dtype=uv.dtype).view(1, 2, 1, 1)
+    kv = _kv((DT / DX_EVAL) / substeps, uv.device, uv.dtype)
 
     outs = []
     for _ in range(n_steps):
@@ -150,8 +169,7 @@ def advect_one_step(field: torch.Tensor, substeps: int = 1,
     """
     b, t, h, w, c = field.shape
     uv = field.permute(0, 1, 4, 2, 3).reshape(b * t, c, h, w)
-    k = (DT / DX_EVAL) / substeps
-    kv = torch.tensor([k, -k], device=uv.device, dtype=uv.dtype).view(1, 2, 1, 1)
+    kv = _kv((DT / DX_EVAL) / substeps, uv.device, uv.dtype)
     for _ in range(substeps):
         d = uv * kv
         if clamp is not None:

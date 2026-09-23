@@ -167,6 +167,14 @@ class AdvectiveUNet(nn.Module):
         self.refine = refine
         self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
         self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
+        # Divisor that brings the derived channels to roughly unit variance.
+        # A buffer rather than a literal built per call: torch.tensor(..., device=
+        # cuda) is a host-to-device copy, which a CUDA graph cannot capture.
+        # Not persistent, so checkpoints written before this stay loadable and
+        # nothing is added to the ones written after.
+        self.register_buffer("der_scale",
+                             torch.tensor([0.1, 10.0, 10.0], dtype=torch.float32),
+                             persistent=False)
 
         c_in = t_in * channels + t_out * channels + 3 + 2
         c_out = t_out * channels
@@ -229,7 +237,7 @@ class AdvectiveUNet(nn.Module):
         der = derived_channels(phys_last[..., 0], phys_last[..., 1])
         # Scale the derived fields to roughly unit variance so they do not
         # dominate the first convolution: vorticity is O(10) in 1/s.
-        der = der / torch.tensor([0.1, 10.0, 10.0], device=der.device)
+        der = der / self.der_scale
         coords = coordinate_channels(b, h, w_, x.device, x.dtype)
 
         return torch.cat([
@@ -592,7 +600,7 @@ class ScaleInvariantUNet(AdvectiveUNet):
 
         phys_last = x_sn[:, -1] * self.std + self.mean
         der = derived_channels(phys_last[..., 0], phys_last[..., 1])
-        der = der / torch.tensor([0.1, 10.0, 10.0], device=der.device)
+        der = der / self.der_scale
         coords = coordinate_channels(b, h, w_, x.device, x.dtype)
 
         log_r = torch.log(r).view(-1, 1, 1, 1).expand(b, 1, h, w_)

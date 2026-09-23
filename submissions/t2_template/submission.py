@@ -92,6 +92,11 @@ SIGMA_GLOBAL = 0.0563870259
 # is then just a noisy sample of the objective it was already trained on.
 #
 # Kept as knobs rather than deleted so the measurement can be re-run.
+# Replay the forward pass from a captured CUDA graph instead of launching its
+# kernels one by one. Off means the model is run normally; it changes speed only,
+# and every output is checked against the eager path before a build ships.
+USE_CUDA_GRAPH = True
+
 ADAPT_STEPS = 0
 ADAPT_LR = 3e-4
 # "head" : the 1x1 output convolution only. "all": every parameter. "none": off.
@@ -228,6 +233,22 @@ class AdvectiveTTT:
             except Exception:
                 self._splittable = False
 
+        # A CUDA graph replays the whole forward pass as one launch. At batch 1
+        # the step is bound by kernel launches rather than arithmetic: the
+        # leaderboard charged the refinement pass 3.45 time_score here against
+        # 0.15 in Track 1, for 15% more arithmetic. Capture happens once, in the
+        # constructor, which is not timed. It is only used for the exact shape it
+        # was captured with, and any failure falls back to running the model
+        # normally -- a graph is a speedup, never a correctness dependency.
+        self._graph = None
+        self._graph_in: Optional[torch.Tensor] = None
+        self._graph_out: Optional[torch.Tensor] = None
+        if USE_CUDA_GRAPH and device.type == "cuda" and ADAPT_STEPS <= 0:
+            try:
+                self._capture_graph()
+            except Exception:
+                self._graph = None
+
         self._half: Optional[torch.Tensor] = None
         self._half_table: Optional[torch.Tensor] = None
         self._alpha_grid: Optional[torch.Tensor] = None
@@ -263,6 +284,44 @@ class AdvectiveTTT:
         # Plain SGD: no optimizer state, so a trajectory reset costs nothing and
         # cannot leak adaptation across trajectory boundaries.
         return torch.optim.SGD(self._params, lr=ADAPT_LR)
+
+    def _capture_graph(self) -> None:
+        """Capture one forward pass at the shape a scored step will use.
+
+        The warm-up runs on a side stream, as capture requires, and allocates the
+        graph's private memory pool; after this the step is a device-to-device
+        copy into the static input, a replay, and a read of the static output.
+        """
+        self.model.eval()
+        self._graph_in = torch.zeros(1, self.model.t_in, 32, 64, 2,
+                                     dtype=torch.float32, device=self.device)
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s), torch.no_grad():
+            for _ in range(3):
+                self.model(self._graph_in)
+        torch.cuda.current_stream().wait_stream(s)
+
+        g = torch.cuda.CUDAGraph()
+        with torch.no_grad(), torch.cuda.graph(g):
+            self._graph_out = self.model(self._graph_in)
+
+        # A replay that does not reproduce the eager result is not usable.
+        probe = torch.randn_like(self._graph_in) * 0.5
+        with torch.no_grad():
+            self._graph_in.copy_(probe)
+            g.replay()
+            if not torch.allclose(self._graph_out, self.model(probe), atol=1e-4):
+                raise RuntimeError("graph replay disagrees with the eager pass")
+        self._graph = g
+
+    def _forward(self, xo: torch.Tensor) -> torch.Tensor:
+        """The model's forward pass, replayed from the graph when one fits."""
+        if self._graph is not None and xo.shape == self._graph_in.shape:
+            self._graph_in.copy_(xo)
+            self._graph.replay()
+            return self._graph_out
+        return self.model(xo)
 
     def _precompute_half_widths(self) -> torch.Tensor:
         """Interval half-widths, in the evaluator's normalized space.
@@ -412,7 +471,9 @@ class AdvectiveTTT:
         self.model.eval()
         xo = self._to_ours(x[..., :2])
         with torch.no_grad():
-            if self._splittable:
+            if self._graph is not None:
+                pred_ours = self._forward(xo)
+            elif self._splittable:
                 # (3) Cache the parameter-free half so an adaptation step does
                 #     not have to recompute the advection prior.
                 feats, adv = self.model.features(xo)
