@@ -64,13 +64,19 @@ def main() -> None:
     ap.add_argument("--tag", required=True)
     ap.add_argument("--model", default=STANDARD_ARCH)
     ap.add_argument("--val-re", default="extrap")
+    ap.add_argument("--val-aoa", default=None,
+                    help="comma-separated AoA values held out in both stages")
+    ap.add_argument("--val-mode", choices=["union", "intersection"], default="union")
     ap.add_argument("--sim-epochs", type=int, default=15)
     ap.add_argument("--real-epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     args, extra = ap.parse_known_args()
 
     common = ["--model", args.model, "--val-re", args.val_re,
-              "--seed", str(args.seed), *extra]
+              "--val-mode", args.val_mode, "--seed", str(args.seed)]
+    if args.val_aoa is not None:
+        common += ["--val-aoa", args.val_aoa]
+    common += extra
 
     sim_tag, real_tag = f"{args.tag}_sim", f"{args.tag}_real"
     run_stage(["--split", "sim", "--epochs", str(args.sim_epochs), *common], sim_tag)

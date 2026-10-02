@@ -202,7 +202,7 @@ class WindowDataset(Dataset):
 
 
 def split_cases(split: str = "real", val_re: tuple[int, ...] = DEFAULT_VAL_RE,
-                val_aoa: tuple[int, ...] = ()):
+                val_aoa: tuple[int, ...] = (), val_mode: str = "union"):
     """Partition trajectories so no held-out regime appears on both sides.
 
     `val_re` holds out whole Reynolds numbers. `val_aoa` holds out whole angles
@@ -211,11 +211,24 @@ def split_cases(split: str = "real", val_re: tuple[int, ...] = DEFAULT_VAL_RE,
     The dataset has only five angles (0, 5, 10, 15, 20), so a model has never had
     to reach one it did not see, and we could not tell whether that costs
     anything. Holding one out is how that question gets an answer.
+
+    When both are supplied, ``val_mode="union"`` holds out either axis.  That
+    is useful for a broad stress test.  ``val_mode="intersection"`` holds out
+    only cases at *both* an unseen angle and an extrapolated Reynolds number;
+    it is the closer match to the private-test regime described by the
+    organizers.  The latter deliberately leaves, for example, AoA=10 at an
+    interior Reynolds number in training: validation needs to answer the hard
+    combined question rather than discard most of the small real-data release.
     """
+    if val_mode not in {"union", "intersection"}:
+        raise ValueError(f"val_mode must be 'union' or 'intersection', got {val_mode!r}")
     _, meta = load_split(split)
     train, val = [], []
     for t in meta["trajectories"]:
-        held = t["re_nominal"] in val_re or t.get("aoa_nominal") in val_aoa
+        by_re = t["re_nominal"] in val_re
+        by_aoa = t.get("aoa_nominal") in val_aoa
+        held = (by_re and by_aoa) if val_re and val_aoa and val_mode == "intersection" \
+            else (by_re or by_aoa)
         (val if held else train).append(t["case"])
     return train, val
 
@@ -226,12 +239,49 @@ def build_datasets(
     train_stride: int = 10,
     val_stride: int = T_IN + T_OUT,   # 40: fully disjoint windows, no cross-window leak
     val_aoa: tuple[int, ...] = (),
+    val_mode: str = "union",
     **kwargs,
 ):
-    train_cases, val_cases = split_cases(split, val_re, val_aoa)
+    train_cases, val_cases = split_cases(split, val_re, val_aoa, val_mode)
     train = WindowDataset(split, cases=train_cases, stride=train_stride, **kwargs)
     val = WindowDataset(split, cases=val_cases, stride=val_stride, **kwargs)
     return train, val
+
+
+def mirror_vertical_velocity(x: torch.Tensor) -> torch.Tensor:
+    """Reflect a normalized velocity field across the streamwise centreline.
+
+    A vertical reflection maps ``(u(x, y), v(x, y))`` to
+    ``(u(x, -y), -v(x, -y))``.  The stored tensors are normalized, not physical
+    velocities, so negating the normalized v channel alone is subtly wrong:
+    its official mean is -0.0005 m/s.  Convert that sign flip algebraically in
+    normalized space instead: ``z_v -> -z_v - 2*mean_v/std_v``.  Applying this
+    to both input and target is an on-the-fly, provenance-preserving training
+    augmentation; validation and inference never call it.
+    """
+    if x.ndim != 5 or x.shape[-1] < 2:
+        raise ValueError(f"expected (B,T,H,W,C>=2), got {tuple(x.shape)}")
+    out = x.flip(dims=(-3,)).clone()  # H / physical-y axis
+    v_shift = -2.0 * float(OFFICIAL_MEAN_REAL[1] / OFFICIAL_STD_REAL[1])
+    out[..., 1] = -out[..., 1] + v_shift
+    return out
+
+
+def maybe_mirror_vertical_velocity(x: torch.Tensor,
+                                   probability: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``x`` with an independent subset of batch elements mirrored.
+
+    The boolean mask is returned so the caller can apply the identical transform
+    to the paired target.  A separate function keeps the random choice out of
+    the data set and therefore guarantees that validation samples are untouched.
+    """
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError(f"mirror probability must be in [0, 1], got {probability}")
+    chosen = torch.rand(x.shape[0], device=x.device) < probability
+    if not bool(chosen.any()):
+        return x, chosen
+    mask = chosen.view(-1, 1, 1, 1, 1)
+    return torch.where(mask, mirror_vertical_velocity(x), x), chosen
 
 
 def denormalize(x: torch.Tensor, channels: int = 2) -> torch.Tensor:

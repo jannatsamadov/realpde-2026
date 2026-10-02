@@ -1,0 +1,20 @@
+{
+  "run": {
+    "rel_l2_score": 96.26879448355982,
+    "tke_score": 76.24064522467593,
+    "mvpe_score": 96.53990922174648,
+    "time_score": 78.06465975880185,
+    "sps_score": 49.72022744505797,
+    "_rel_l2_error": 0.07751640677452087,
+    "_tke_error": 0.6232726573944092,
+    "_mvpe_error": 0.07168208062648773,
+    "_sps_coverage": 0.8805616717511848,
+    "_measured_channels": 2,
+    "_mean_t_neural_s": 0.057555059340655385,
+    "_weight_drift": 0.0,
+    "_adapt_calls": 0,
+    "_selection": 89.68311630999408,
+    "_total_wall_s": 31.42506239999784,
+    "_bounds": true
+  }
+}

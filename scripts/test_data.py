@@ -18,7 +18,7 @@ import torch
 
 from realpde.data import (
     T_IN, T_OUT, WindowDataset, build_datasets, denormalize, split_cases,
-    to_submission_format,
+    maybe_mirror_vertical_velocity, mirror_vertical_velocity, to_submission_format,
 )
 
 
@@ -59,6 +59,30 @@ def check_no_window_leak(ds: WindowDataset, label: str):
 
 def main() -> None:
     check_split_disjoint()
+
+    # The combined split must isolate cases where BOTH unseen axes meet, rather
+    # than silently falling back to the old one-axis protocol.
+    tr_joint, va_joint = split_cases("real", (3750, 5025, 25425, 26700), (10,),
+                                     val_mode="intersection")
+    joint = set(va_joint)
+    assert joint and all(int(c.split("_")[0]) in {3750, 5025, 25425, 26700}
+                         and int(c.split("_")[1]) == 10 for c in joint)
+    assert not (set(tr_joint) & joint)
+    print(f"combined extrapolation/AoA split: {len(tr_joint)} train, {len(va_joint)} val cases")
+
+    # Reflection is an involution and flips v in physical (not merely normalized)
+    # units.  Both facts guard against a very easy mean-normalization bug.
+    z = torch.randn(3, 20, 32, 64, 2)
+    zz = mirror_vertical_velocity(mirror_vertical_velocity(z))
+    assert torch.allclose(z, zz), "vertical mirror is not an involution"
+    phys = denormalize(z, 2)
+    phys_m = denormalize(mirror_vertical_velocity(z), 2)
+    assert torch.allclose(phys_m[..., 0], phys.flip(-3)[..., 0])
+    assert torch.allclose(phys_m[..., 1], -phys.flip(-3)[..., 1])
+    torch.manual_seed(0)
+    same, picked = maybe_mirror_vertical_velocity(z, 0.0)
+    assert not bool(picked.any()) and same.data_ptr() == z.data_ptr()
+    print("combined split and vertical-mirror transform: OK")
 
     train, val = build_datasets("real", train_stride=10)
     print(f"real  train windows {len(train)}, val windows {len(val)}")

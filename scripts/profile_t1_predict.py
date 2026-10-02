@@ -73,7 +73,7 @@ def main():
 
     # Phases inside a call, timed individually where the module exposes them.
     import torch
-    model, dev = mod._model()
+    model, dev = mod._load_model()
     xt = torch.from_numpy((x[..., :2] - mod.MEAN[:2]) / mod.STD[:2]).float()
 
     def timed(fn, iters=3):
@@ -95,7 +95,9 @@ def main():
             torch.cat(outs)
 
     t_fwd = timed(forward)
-    pred = np.asarray(out[0] if isinstance(out, tuple) else out, dtype=np.float32)
+    # With bounds on, predict returns {"prediction", "lower", "upper"}.
+    pred = np.asarray(out["prediction"] if isinstance(out, dict) else out,
+                      dtype=np.float32)
     t_bounds = timed(lambda: mod._bounds(pred)) if hasattr(mod, "_bounds") else 0.0
 
     print(f"\n{'forward passes (chunked, as predict does)':<44}{t_fwd * 1000:9.1f} ms")

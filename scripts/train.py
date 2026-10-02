@@ -40,7 +40,8 @@ from gpu_guard import Governor, gpu_status
 from gpu_lock import GpuLock
 from realpde.advection import strain_scaled_noise
 from realpde.data import (DEFAULT_VAL_RE, EXTRAPOLATION_VAL_RE, build_datasets,
-                          denormalize)
+                          denormalize, maybe_mirror_vertical_velocity,
+                          mirror_vertical_velocity)
 from realpde.local_score import format_scores, score_arrays
 from realpde.losses import CompositeLoss, sigma_weights
 from realpde.models import (_ARCHS, STANDARD_ARCH, build_model,
@@ -129,14 +130,23 @@ def main() -> None:
                     help="comma-separated Reynolds numbers to hold out, e.g. "
                          "'3750,5025,25425,26700'. The default holds out three "
                          "INTERIOR values, which measures interpolation; holding "
-                         "out the extremes measures extrapolation, which is what "
-                         "the private test actually asks for. Use 'extrap' for "
-                         "the four extreme regimes.")
+                          "out the extremes measures extrapolation, which is what "
+                          "the private test actually asks for. Use 'extrap' for "
+                          "the four extreme regimes.")
+    ap.add_argument("--val-mode", choices=["union", "intersection"], default="union",
+                    help="when both --val-re and --val-aoa are supplied: hold out "
+                    "either axis (union), or only their joint unseen regimes "
+                    "(intersection).")
     ap.add_argument("--noise-aug", type=float, default=0.0,
                     help="strain-scaled noise added to the INPUT during training, "
-                         "as a fraction of the input's fluctuation sd. Teaches the "
-                         "model to denoise: most useful on the simulated split, "
-                         "whose targets are clean. 0 disables it.")
+                          "as a fraction of the input's fluctuation sd. Teaches the "
+                          "model to denoise: most useful on the simulated split, "
+                          "whose targets are clean. 0 disables it.")
+    ap.add_argument("--mirror-aug", type=float, default=0.0,
+                    help="probability of reflecting a train sample across the "
+                    "streamwise centreline (u unchanged, v sign-reversed). "
+                    "This expands the angle-of-attack axis without generating "
+                    "external data. 0 disables it.")
     ap.add_argument("--gpu-duty", type=float, default=0.72,
                     help="target GPU duty cycle; the fan on this machine is dead")
     ap.add_argument("--max-temp", type=float, default=78.0,
@@ -167,11 +177,9 @@ def main() -> None:
 
     val_aoa = () if args.val_aoa is None else tuple(
         int(v) for v in args.val_aoa.split(","))
-    if val_aoa:
-        val_re = ()          # hold out the angle alone, so the axes do not mix
     train_ds, val_ds = build_datasets(args.split, val_re=val_re,
                                       train_stride=args.train_stride,
-                                      val_aoa=val_aoa)
+                                      val_aoa=val_aoa, val_mode=args.val_mode)
     # The simulation split carries pressure as a third channel; only u and v are
     # ever scored, so both splits are trained on the same two.
     use_channels = 2
@@ -203,13 +211,17 @@ def main() -> None:
     print(f"\ndevice {device}   {gpu_line()}")
     print(f"model  {n_par:,} params, {mb:.1f} MB fp32, base={args.base}")
     print(f"data   {args.split}: {len(train_ds)} train / {len(val_ds)} val windows")
-    if val_aoa:
+    if val_aoa and val_re:
+        print(f"val Re {val_re} + AoA {val_aoa} ({args.val_mode})")
+    elif val_aoa:
         print(f"val AoA {val_aoa} — every Reynolds number is in training, "
               f"only the angle is unseen")
     else:
         print(f"val Re {val_re}  "
               f"({'EXTRAPOLATION' if min(val_re) < 6300 or max(val_re) > 24150 else 'interpolation'})")
     print(f"loss   mse={args.w_mse} tke={args.w_tke} mvpe={args.w_mvpe}")
+    if args.mirror_aug:
+        print(f"augment mirror-y probability {args.mirror_aug:.0%} (train only)")
     print(f"gpu duty target {args.gpu_duty:.0%}, pause above {args.max_temp:.0f}C "
           f"(fan is dead — deliberate throttle)\n")
 
@@ -242,6 +254,15 @@ def run(model, opt, sched, criterion, train_loader, val_loader, device,
             with gov.step():
                 x = batch["input"][..., :use_channels].to(device, non_blocking=True)
                 y = batch["target"][..., :use_channels].to(device, non_blocking=True)
+
+                # Reflect paired windows together.  The target must get the
+                # exact same per-sample transform; otherwise this would turn a
+                # legal symmetry augmentation into label noise.
+                if args.mirror_aug > 0:
+                    x, mirrored = maybe_mirror_vertical_velocity(x, args.mirror_aug)
+                    if bool(mirrored.any()):
+                        mask = mirrored.view(-1, 1, 1, 1, 1)
+                        y = torch.where(mask, mirror_vertical_velocity(y), y)
 
                 # Corrupt the input, keep the target. On the simulated split the
                 # target is genuinely clean, so this teaches denoising outright;

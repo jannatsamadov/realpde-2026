@@ -1,0 +1,18 @@
+{
+  "checkpoint": "checkpoints\\sl_default_best.pt",
+  "zip": "D:\\Projects\\Competitions\\realpde\\submissions\\t1_solverloop.zip",
+  "extracted_mb": 7.170384407043457,
+  "scores": {
+    "rel_l2_score": 96.26188691173382,
+    "tke_score": 76.30048076824686,
+    "mvpe_score": 96.54417991340527,
+    "time_score": 87.34440785173547,
+    "sps_score": 48.89933768246647,
+    "_rel_l2_error": 0.07766548544168472,
+    "_tke_error": 0.6212154626846313,
+    "_mvpe_error": 0.07159043848514557,
+    "_sps_coverage": 0.8775027136312359,
+    "_measured_channels": 2,
+    "_mean_t_neural_s": 0.015303769963367027
+  }
+}

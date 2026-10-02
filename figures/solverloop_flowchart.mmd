@@ -1,0 +1,46 @@
+%% Solver-in-the-loop forecaster (t1_solverloop, checkpoint sl_default_best.pt).
+%% Shapes and parameter counts measured from the built model (scripts/trace_model.py).
+flowchart TD
+    X["Input window<br/>20 frames × 32×64 × (u, v)"]
+
+    ADV["Advection prior · fixed, 0 params<br/>semi-Lagrangian self-advection of the last frame<br/>20 steps × 2 substeps, no pressure, no viscosity"]
+    FS1["Feature stack · 85 ch @ 32×64<br/>40 input + 40 advected + 3 speed/vorticity/divergence + 2 x,y"]
+
+    subgraph UNET["U-Net · 1,788,584 params · block = (3×3 conv → GroupNorm → GELU) × 2"]
+        direction TB
+        E1["enc1 · 64 @ 32×64"] -->|avgpool ×2| E2["enc2 · 96 @ 16×32"]
+        E2 -->|avgpool ×2| E3["enc3 · 128 @ 8×16"]
+        E3 -->|avgpool ×2| BN["bottleneck · 160 @ 4×8"]
+        BN -->|upsample ×2| D3["dec3 · 128 @ 8×16"]
+        D3 -->|upsample ×2| D2["dec2 · 96 @ 16×32"]
+        D2 -->|upsample ×2| D1["dec1 · 64 @ 32×64"]
+        D1 --> HD["head · 1×1 conv → 40 ch = residual"]
+        E3 -. skip .-> D3
+        E2 -. skip .-> D2
+        E1 -. skip .-> D1
+    end
+
+    P1["Pass 1 = prior + residual"]
+    RP["Refined prior · fixed, 0 params<br/>frame k = pass-1 frame k−1 advected one step<br/>(frame 0 from the last input frame)"]
+    FS2["Feature stack with the refined prior"]
+    U2["Same U-Net · shared weights"]
+    OUT["Final forecast = refined prior + residual<br/>20 frames × 32×64 × (u, v)"]
+
+    X --> ADV --> FS1
+    X --> FS1
+    FS1 --> E1
+    HD --> P1
+    ADV --> P1
+    P1 --> RP
+    X --> RP
+    RP --> FS2
+    X --> FS2
+    FS2 --> U2 --> OUT
+    RP --> OUT
+
+    classDef phys fill:#FBF3E4,stroke:#9A6310,color:#1B2220
+    classDef learn fill:#EAF1F8,stroke:#2F5F8A,color:#1B2220
+    classDef out fill:#EEF6F1,stroke:#2E7D5B,color:#1B2220
+    class ADV,RP phys
+    class E1,E2,E3,BN,D3,D2,D1,HD,U2 learn
+    class OUT out
